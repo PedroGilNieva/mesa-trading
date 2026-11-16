@@ -17,7 +17,7 @@ from mesa_trading.constants import PINNED_MODEL
 from mesa_trading.events import make_event
 from mesa_trading.filter.funnel import bank_until, cheap, hard, still_banked
 from mesa_trading.logs.sink import LogSink
-from mesa_trading.models import Order, Position, Proposal
+from mesa_trading.models import Order, Position, Proposal, RestingOrder
 from mesa_trading.policy.decide import decide, policy_counts_as_evidence
 from mesa_trading.questions.catalog import battery_for, realized_outcome
 from mesa_trading.risk.engine import RiskFacts, evaluate
@@ -102,10 +102,11 @@ def _run_locked(env: DeskEnv, cycle_id: str, now: datetime) -> dict:
         return {"halted": True, "orders": 0, "resumed": resumed}
 
     _resolve_pending(env, state, cycle_id, now)
+    _resolve_resting(env, state, cycle_id, now)
     orders = 0
-    if state.position is None:
+    if state.position is None and state.resting_order is None:
         orders += _seek(env, state, cycle_id, now, funnel)
-    else:
+    elif state.position is not None:
         orders += _manage(env, state, cycle_id, now, funnel)
     _maybe_halt(env, state, cycle_id, now)
     _finish(env, state, generation, cycle_id, now, "ok", funnel)
@@ -227,6 +228,7 @@ def _consider(env, state, bot, market, mode, cycle_id, now, funnel, managing, ra
             "threshold_version": proposal.threshold_version,
             "thresholds": proposal.thresholds,
             "reason": proposal.reason,
+            "condiciones": list(proposal.condiciones),
             "habria_hecho": proposal.action,
         },
         parts=(market, proposal.action),
@@ -305,14 +307,167 @@ def _submit(env, state, proposal: Proposal, snapshot, cycle_id, now, mode, book=
     )
     fills = [fill for fill in broker.fills() if fill.client_order_id == order.client_order_id]
     if not fills:
+        if order.order_type == "limit" and ack.accepted and ack.detail == "ack_sin_fill":
+            _park_limit(env, state, order, proposal, cycle_id, now, mode)
         return 0
-    fill = fills[-1]
+    _open_filled(
+        env,
+        state,
+        fill=fills[-1],
+        cycle_id=cycle_id,
+        now=now,
+        mode=mode,
+        bot=proposal.bot,
+        market=market,
+        action=proposal.action,
+        notional_usd=proposal.notional_usd,
+        kind=proposal.kind,
+        threshold_version=proposal.threshold_version,
+        cuenta_como_evidencia=policy_counts_as_evidence(env.policy),
+    )
+    return 1
+
+
+def _park_limit(env, state, order: Order, proposal: Proposal, cycle_id: str, now: datetime, mode: str) -> None:
+    """Sin vela que cruce, la cotización espera al siguiente tick. No abre posición."""
+    if order.limit_price is None or state.position is not None or state.resting_order is not None:
+        return
+    expires = as_utc(now) + timedelta(minutes=env.config.cadence_minutes)
+    resting = RestingOrder(
+        client_order_id=order.client_order_id,
+        cycle_id=cycle_id,
+        bot=proposal.bot,
+        market=order.market,
+        side=order.side,
+        action=proposal.action,
+        qty=order.qty,
+        notional_usd=order.notional_usd,
+        limit_price=order.limit_price,
+        decision_time=as_utc(now),
+        expires_at=expires,
+        reason=proposal.reason,
+        kind=proposal.kind,
+        threshold_version=proposal.threshold_version,
+        cuenta_como_evidencia=policy_counts_as_evidence(env.policy),
+    )
+    state.resting_order = resting
+    _emit(
+        env,
+        "OrderResting",
+        cycle_id,
+        now,
+        bot=proposal.bot,
+        mode=mode,
+        payload={
+            "client_order_id": resting.client_order_id,
+            "market": resting.market,
+            "limit_price": str(resting.limit_price),
+            "expires_at": iso(expires),
+        },
+        parts=(resting.client_order_id, "resting"),
+    )
+
+
+def _resolve_resting(env, state, cycle_id: str, now: datetime) -> None:
+    resting = state.resting_order
+    if resting is None:
+        return
+    mode = env.config.bots[resting.bot].mode if resting.bot in env.config.bots else "simulated"
+    if state.position is not None:
+        _cancel_resting(env, state, cycle_id, now, mode, "ya_hay_posicion")
+        return
+    raw = None
+    try:
+        raw = _fetch(env, resting.market, now, with_retries=False)
+    except Exception:
+        raw = None
+    fill = None
+    if raw is not None:
+        _fill_liquidity(raw)
+        snapshot = build_snapshot(resting.bot, resting.market, raw, now)
+        price = _mark(snapshot) or resting.limit_price
+        order = Order(
+            client_order_id=resting.client_order_id,
+            cycle_id=resting.cycle_id,
+            bot=resting.bot,
+            market=resting.market,
+            side=resting.side,
+            action=resting.action,
+            order_type="limit",
+            qty=resting.qty,
+            notional_usd=resting.notional_usd,
+            limit_price=resting.limit_price,
+            decision_time=as_utc(resting.decision_time),
+            reason=resting.reason,
+            kind=resting.kind,
+        )
+        broker = _sim(env, resting.market, snapshot, price, book=_book(raw), decision=as_utc(resting.decision_time))
+        broker.submit(order)
+        fills = [item for item in broker.fills() if item.client_order_id == order.client_order_id]
+        fill = fills[-1] if fills else None
+    if fill is not None and state.position is None:
+        _open_filled(
+            env,
+            state,
+            fill=fill,
+            cycle_id=cycle_id,
+            now=now,
+            mode=mode,
+            bot=resting.bot,
+            market=resting.market,
+            action=resting.action,
+            notional_usd=resting.notional_usd,
+            kind=resting.kind,
+            threshold_version=resting.threshold_version,
+            cuenta_como_evidencia=resting.cuenta_como_evidencia,
+        )
+        state.resting_order = None
+        return
+    if as_utc(now) >= as_utc(resting.expires_at):
+        _cancel_resting(env, state, cycle_id, now, mode, "expirada")
+
+
+def _cancel_resting(env, state, cycle_id: str, now: datetime, mode: str, reason: str) -> None:
+    resting = state.resting_order
+    if resting is None:
+        return
+    state.resting_order = None
+    if resting.client_order_id not in state.seen_orders:
+        state.seen_orders.append(resting.client_order_id)
+    _emit(
+        env,
+        "OrderCancelled",
+        cycle_id,
+        now,
+        bot=resting.bot,
+        mode=mode,
+        payload={"client_order_id": resting.client_order_id, "market": resting.market, "reason": reason},
+        parts=(resting.client_order_id, reason),
+    )
+
+
+def _open_filled(
+    env,
+    state,
+    *,
+    fill,
+    cycle_id: str,
+    now: datetime,
+    mode: str,
+    bot: str,
+    market: str,
+    action: str,
+    notional_usd,
+    kind: str,
+    threshold_version: int,
+    cuenta_como_evidencia: bool,
+) -> None:
     _emit(
         env,
         "OrderFilled",
         cycle_id,
         now,
-        bot=proposal.bot,
+        bot=bot,
         mode=mode,
         payload={
             "client_order_id": fill.client_order_id,
@@ -321,31 +476,32 @@ def _submit(env, state, proposal: Proposal, snapshot, cycle_id, now, mode, book=
             "slippage_usd": str(fill.slippage_usd),
             "price_source": fill.price_source,
         },
-        parts=(order.client_order_id, "fill"),
+        parts=(fill.client_order_id, "fill"),
     )
     position = Position(
         market=market,
-        bot=proposal.bot,
-        side="short" if proposal.action == "short" else "long",
+        bot=bot,
+        side="short" if action == "short" else "long",
         qty=fill.qty,
         entry_price=fill.price,
-        notional_usd=proposal.notional_usd,
+        notional_usd=notional_usd,
         opened_at=fill.filled_at,
         fees_usd=fill.fee_usd,
         slippage_usd=fill.slippage_usd,
-        kind=proposal.kind,
-        threshold_version=proposal.threshold_version,
-        cuenta_como_evidencia=policy_counts_as_evidence(env.policy),
+        kind=kind,
+        threshold_version=threshold_version,
+        cuenta_como_evidencia=cuenta_como_evidencia,
     )
     open_position(state, position, fill.fee_usd, fill.slippage_usd)
-    state.seen_orders.append(order.client_order_id)
+    if fill.client_order_id not in state.seen_orders:
+        state.seen_orders.append(fill.client_order_id)
     state.last_prices[market] = str(fill.price)
     _emit(
         env,
         "PositionOpened",
         cycle_id,
         now,
-        bot=proposal.bot,
+        bot=bot,
         mode=mode,
         payload={
             "market": market,
@@ -356,7 +512,6 @@ def _submit(env, state, proposal: Proposal, snapshot, cycle_id, now, mode, book=
         },
         parts=(market,),
     )
-    return 1
 
 
 def _close(env, state, cycle_id, now, mode, reason, snapshot, book=None) -> int:

@@ -16,6 +16,10 @@ class DataRoot:
     def write_text(self, key: str, text: str) -> None:
         raise NotImplementedError
 
+    def list_prefix(self, prefix: str, max_results: int | None = None) -> tuple[list[str], bool]:
+        _ = (prefix, max_results)
+        return [], False
+
 
 class LocalRoot(DataRoot):
     def __init__(self, root: Path) -> None:
@@ -32,6 +36,18 @@ class LocalRoot(DataRoot):
         path = self.root / key
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
+
+    def list_prefix(self, prefix: str, max_results: int | None = None) -> tuple[list[str], bool]:
+        base = self.root / prefix
+        if base.is_file():
+            return [prefix], False
+        if not base.exists():
+            return [], False
+        found = sorted(path.relative_to(self.root).as_posix() for path in base.rglob("*") if path.is_file())
+        if max_results is not None and len(found) > max_results:
+            # El orden lexicográfico de los ciclos es el tiempo: el tope se queda con los últimos.
+            return found[-max_results:], True
+        return found, False
 
 
 class GcsRoot(DataRoot):
@@ -53,6 +69,11 @@ class GcsRoot(DataRoot):
         status, _body = _request("POST", url, self.token_provider(), text.encode("utf-8"), "application/json")
         if status not in (200, 201):
             raise RuntimeError(f"no se pudo escribir {key}")
+
+    def list_prefix(self, prefix: str, max_results: int | None = None) -> tuple[list[str], bool]:
+        from mesa_trading.gcs import _list
+
+        return _list(self.bucket, prefix, self.token_provider(), max_results=max_results)
 
 
 def data_root_from_env() -> DataRoot:

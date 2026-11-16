@@ -70,7 +70,8 @@ class GcsLogSink(LogSink):
         token = self.token_provider()
         names: list[str] = []
         for day in _days_between(start, end):
-            for name in _list(self.bucket, f"logs/dt={day}/", token):
+            found, _truncated = _list(self.bucket, f"logs/dt={day}/", token)
+            for name in found:
                 if _is_log_object(name):
                     names.append(name)
         rows: list[dict] = []
@@ -295,38 +296,110 @@ def _delete(bucket: str, key: str, token: str, generation: int) -> None:
         return
 
 
-def _list(bucket: str, prefix: str, token: str) -> list[str]:
+def _lex_mid(left: str, right: str) -> str | None:
+    """Un nombre entre left y right. None si ya no hay hueco."""
+    if left >= right:
+        return None
+    limit = max(len(left), len(right))
+    for index in range(limit):
+        left_code = ord(left[index]) if index < len(left) else -1
+        right_code = ord(right[index]) if index < len(right) else 0
+        if left_code == right_code:
+            continue
+        if right_code - left_code > 1:
+            start = 0 if left_code < 0 else left_code
+            return left[:index] + chr(start + (right_code - start) // 2)
+        candidate = left + " "
+        if left < candidate < right:
+            return candidate
+        return None
+    return None
+
+
+def _list(
+    bucket: str,
+    prefix: str,
+    token: str,
+    max_results: int | None = None,
+    fetch=None,
+) -> tuple[list[str], bool]:
+    """Lista un prefijo.
+
+    Sin tope, pagina todo. Con tope, no sigue el pageToken de más: si el
+    prefijo no cabe, busca el tramo final (los nombres más nuevos) con
+    startOffset, en unos pocos intentos.
+    """
     import sys
     import urllib.parse
     import urllib.request
 
-    names: list[str] = []
-    page = ""
-    seen_tokens: set[str] = set()
-    warned = False
-    while True:
-        query = urllib.parse.urlencode(
-            {"prefix": prefix, "maxResults": "1000", **({"pageToken": page} if page else {})}
-        )
-        url = f"https://storage.googleapis.com/storage/v1/b/{bucket}/o?{query}"
+    def default_fetch(url: str) -> dict:
         req = urllib.request.Request(url, headers=_headers(token))
         with urllib.request.urlopen(req, timeout=15) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-        names.extend(item["name"] for item in payload.get("items") or [])
-        page = str(payload.get("nextPageToken") or "")
-        if not page:
+            return json.loads(response.read().decode("utf-8"))
+
+    fetch = fetch or default_fetch
+
+    def page(start_offset: str | None, limit: int, page_token: str = "") -> tuple[list[str], str]:
+        query: dict[str, str] = {"prefix": prefix, "maxResults": str(limit)}
+        if start_offset:
+            query["startOffset"] = start_offset
+        if page_token:
+            query["pageToken"] = page_token
+        url = f"https://storage.googleapis.com/storage/v1/b/{bucket}/o?{urllib.parse.urlencode(query)}"
+        payload = fetch(url)
+        items = [item["name"] for item in payload.get("items") or []]
+        return items, str(payload.get("nextPageToken") or "")
+
+    if max_results is None:
+        names: list[str] = []
+        page_token = ""
+        seen_tokens: set[str] = set()
+        warned = False
+        truncated = False
+        while True:
+            items, page_token = page(None, 1000, page_token)
+            names.extend(items)
+            if not page_token:
+                break
+            if page_token in seen_tokens:
+                print(f"aviso: token de página repetido al listar {prefix}", file=sys.stderr)
+                truncated = True
+                break
+            seen_tokens.add(page_token)
+            if len(names) >= 5000 and not warned:
+                warned = True
+                print(
+                    f"aviso: el listado de {prefix} ya pasa de 5000 objetos; se sigue paginando",
+                    file=sys.stderr,
+                )
+        return names, truncated
+
+    first, next_token = page(None, max_results)
+    if not next_token and len(first) <= max_results:
+        return first, False
+    # Hay más objetos. El primer tramo es el más viejo: se busca el final
+    # sin recorrer cada página. Si un intento sigue lleno, el piso salta
+    # al último nombre visto.
+    low = prefix
+    high = prefix + "\uffff"
+    best = first[:max_results]
+    for _ in range(40):
+        mid = _lex_mid(low, high)
+        if mid is None:
             break
-        if page in seen_tokens:
-            print(f"aviso: token de página repetido al listar {prefix}", file=sys.stderr)
+        got, more = page(mid, max_results)
+        if more or len(got) > max_results:
+            nxt = (got[-1] + " ") if got else mid
+            if nxt <= low:
+                break
+            low = nxt
+            continue
+        best = got[:max_results]
+        if mid >= high:
             break
-        seen_tokens.add(page)
-        if len(names) >= 5000 and not warned:
-            warned = True
-            print(
-                f"aviso: el listado de {prefix} ya pasa de 5000 objetos; se sigue paginando",
-                file=sys.stderr,
-            )
-    return names
+        high = mid
+    return best, True
 
 
 def _download_many(bucket: str, names: list[str], token: str) -> list[bytes | None]:

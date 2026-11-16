@@ -188,12 +188,12 @@ def _gambler(market, kind, answers, capital, rules, version, managing) -> Propos
     p_trend = _p(answers["regimen"], "tendencia")
     p_action = answers["accion"]["probs"]
     top = max(p_action, key=p_action.get)
-    p_top = Decimal(str(p_action[top]))
     setup = _score(answers["setup"])
     p_bad = _p(answers["ejecucion_degradada"], "si")
     common = dict(bot="gambler", market=market, kind=kind, threshold_version=version, thresholds=dict(rules))
     if p_trend is None or setup is None or p_bad is None:
         return _hold("gambler", market, kind, version, rules, "dato_faltante")
+    failed = gambler_blockers(answers, rules) or []
     exit_now = (
         p_trend < Decimal(str(rules["regimen_tendencia_min_p"]))
         or top == "hold"
@@ -202,15 +202,8 @@ def _gambler(market, kind, answers, capital, rules, version, managing) -> Propos
     if managing:
         action = "close" if exit_now else "hold"
         return Proposal(**common, action=action, reason="salida" if action == "close" else "mantener", is_entry=False)
-    ok = (
-        p_trend >= Decimal(str(rules["regimen_tendencia_min_p"]))
-        and setup >= Decimal(str(rules["setup_min"]))
-        and top != "hold"
-        and p_top >= Decimal(str(rules["accion_min_p"]))
-        and p_bad < Decimal(str(rules["ejecucion_degradada_max_p"]))
-    )
-    if not ok:
-        return Proposal(**common, action="hold", reason="umbral", is_entry=False)
+    if failed:
+        return Proposal(**common, action="hold", reason="umbral", condiciones=failed, is_entry=False)
     if top == "corto" and kind == "spot":
         return Proposal(**common, action="hold", reason="corto_en_spot", is_entry=False)
     action = "short" if top == "corto" else "long"
@@ -249,6 +242,33 @@ def _house(market, kind, answers, capital, rules, version, managing) -> Proposal
         reason="cotizar",
         is_entry=True,
     )
+
+
+def gambler_blockers(answers: dict, rules: dict) -> list[str] | None:
+    """Condiciones de entrada que no pasan. None si falta un dato para evaluarlas."""
+    needed = ("regimen", "setup", "accion", "ejecucion_degradada")
+    if any(qid not in answers for qid in needed):
+        return None
+    p_trend = _p(answers["regimen"], "tendencia")
+    probs = (answers.get("accion") or {}).get("probs") or {}
+    if not probs:
+        return None
+    top = max(probs, key=probs.get)
+    p_top = Decimal(str(probs[top]))
+    setup = _score(answers["setup"])
+    p_bad = _p(answers["ejecucion_degradada"], "si")
+    if p_trend is None or setup is None or p_bad is None:
+        return None
+    failed = []
+    if p_trend < Decimal(str(rules["regimen_tendencia_min_p"])):
+        failed.append("regimen")
+    if setup < Decimal(str(rules["setup_min"])):
+        failed.append("setup")
+    if top == "hold" or p_top < Decimal(str(rules["accion_min_p"])):
+        failed.append("accion")
+    if p_bad >= Decimal(str(rules["ejecucion_degradada_max_p"])):
+        failed.append("ejecucion_degradada")
+    return failed
 
 
 def _missing_fields(answer: dict) -> bool:

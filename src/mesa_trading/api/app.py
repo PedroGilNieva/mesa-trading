@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from mesa_trading.config import default_desk_path, load_desk
+from mesa_trading.policy.decide import load_policy
+from mesa_trading.reports.decisions import cached_decision_report
 from mesa_trading.storage import DataRoot, data_root_from_env
 
 
@@ -40,12 +43,18 @@ def create_app(root: DataRoot | None = None, desk_path: Path | None = None) -> F
             "ultimo_ciclo_en": state.get("last_cycle_at"),
             "operaciones_cerradas": state.get("closed_trades", 0),
             "posicion_abierta": position,
+            "resting_order": state.get("resting_order"),
             "vetos_activos": {
                 "halted_until": state.get("halted_until"),
                 "halt_rule": state.get("halt_rule"),
             },
             "broker": "simulado",
         }
+
+    @app.get("/decisiones/hoy")
+    def decisiones_hoy():
+        # Un día de bitácora, no el bucket entero. /estado sigue leyendo solo el libro.
+        return JSONResponse(cached_decision_report(store, datetime.now(timezone.utc), load_policy()))
 
     @app.get("/reportes", response_class=HTMLResponse)
     def reportes() -> str:
