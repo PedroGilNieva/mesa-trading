@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from mesa_trading.config import DeskConfig, PromotionConfig
 from mesa_trading.constants import ESTIMATED_INPUT_TOKENS_PER_CALL
+from mesa_trading.policy.decide import IDENTITY_POLICY_VERSION
 from mesa_trading.questions.catalog import battery_for
 from mesa_trading.filter.funnel import silent_step_alerts
 from mesa_trading.util import as_utc, iso
@@ -19,6 +20,8 @@ CDMX = ZoneInfo("America/Mexico_City")
 # Ids de pares ya contados. El reporte solo relee ~26 h, así que con esto basta
 # para no duplicar y pares.json no crece sin techo.
 PAIR_ID_CAP = 10000
+# Misma barra que filtro_mudo: un hold suelto no es una mesa sin entradas.
+SIN_ENTRADAS_MIN_DECISIONES = 50
 POLICY_QUESTIONS = {
     "gambler": ("regimen", "setup", "accion", "ejecucion_degradada"),
     "house": ("estado_rango", "flujo_toxico", "vale_cotizar", "hay_volumen"),
@@ -140,51 +143,51 @@ def readiness(bot: str, stats: dict, promo: PromotionConfig) -> dict:
     return {"bot": bot, "listo_para_simulado": "sí" if ready else "no", "motivos": checks}
 
 
-def build_calibration(
-    events: list[dict],
-    promo: PromotionConfig,
-    config: DeskConfig,
-    now: datetime,
-    pair_store: dict | None = None,
-) -> dict:
-    store = update_pair_store(pair_store, events)
-    per_bot = {}
+def _score_questions(pares: dict) -> dict:
     questions = {}
-    for bot, policy_qids in POLICY_QUESTIONS.items():
-        qids = tuple(question.id for question in battery_for(bot))
+    for bot in POLICY_QUESTIONS:
+        bot_pares = pares.get(bot) or {}
         bot_questions = {}
-        skills = []
-        deviations = []
-        buckets_ok = True
-        min_resolved = 10**9
-        for qid in qids:
-            raw_pairs = ((store.get("pares") or {}).get(bot) or {}).get(qid) or []
+        for question in battery_for(bot):
+            qid = question.id
+            raw_pairs = bot_pares.get(qid) or []
             pairs = [(float(item[0]), int(item[1])) for item in raw_pairs]
             score = brier_binary(pairs)
             base = brier_baseline(pairs)
-            sk = skill(score, base)
-            curve = reliability(pairs)
-            counted = [bucket for bucket in curve if bucket["n"] >= promo.min_bucket_samples]
-            if qid in policy_qids:
-                if not counted:
-                    buckets_ok = False
-                max_dev = max((bucket["desvio_pp"] for bucket in counted), default=None)
-                if max_dev is not None:
-                    deviations.append(max_dev)
-                if sk is not None:
-                    skills.append(sk)
-                min_resolved = min(min_resolved, len(pairs))
             bot_questions[qid] = {
                 "n": len(pairs),
                 "brier": score,
                 "brier_base": base,
-                "skill": sk,
-                "confiabilidad": curve,
+                "skill": skill(score, base),
+                "confiabilidad": reliability(pairs),
                 "platt": propose_platt(pairs),
             }
+        questions[bot] = bot_questions
+    return questions
+
+
+def _readiness_by_bot(questions: dict, promo: PromotionConfig, events: list[dict], config: DeskConfig, now: datetime) -> dict:
+    missed = _missed_pct(events, config, now)
+    per_bot = {}
+    for bot, policy_qids in POLICY_QUESTIONS.items():
+        skills = []
+        deviations = []
+        buckets_ok = True
+        min_resolved = 10**9
+        bot_questions = questions.get(bot) or {}
+        for qid in policy_qids:
+            block = bot_questions.get(qid) or {}
+            counted = [bucket for bucket in (block.get("confiabilidad") or []) if bucket["n"] >= promo.min_bucket_samples]
+            if not counted:
+                buckets_ok = False
+            max_dev = max((bucket["desvio_pp"] for bucket in counted), default=None)
+            if max_dev is not None:
+                deviations.append(max_dev)
+            if block.get("skill") is not None:
+                skills.append(block["skill"])
+            min_resolved = min(min_resolved, int(block.get("n") or 0))
         if min_resolved == 10**9:
             min_resolved = 0
-        missed = _missed_pct(events, config, now)
         stats = {
             "shadow_days": _shadow_days(events, bot, now),
             "min_resolved": min_resolved,
@@ -194,14 +197,71 @@ def build_calibration(
             "missed_pct": missed,
         }
         per_bot[bot] = readiness(bot, stats, promo)
-        questions[bot] = bot_questions
+    return per_bot
+
+
+def evidence_snapshot(calibration: dict) -> dict:
+    """El GO usa el periodo de evidencia más nuevo. La version 2 no entra."""
+    chosen = None
+    for body in (calibration.get("periodos") or {}).values():
+        if not body.get("cuenta_como_evidencia"):
+            continue
+        version = int(body.get("threshold_version") or -1)
+        if chosen is None or version > int(chosen.get("threshold_version") or -1):
+            chosen = body
+    if chosen is None:
+        return {
+            "threshold_version": None,
+            "cuenta_como_evidencia": False,
+            "cierres": 0,
+            "pnl_usd": "0",
+            "desde": None,
+            "drawdown_usd": "0",
+        }
+    return {
+        "threshold_version": chosen.get("threshold_version"),
+        "cuenta_como_evidencia": True,
+        "cierres": int(chosen.get("cierres") or 0),
+        "pnl_usd": str(chosen.get("pnl_usd") or "0"),
+        "desde": chosen.get("desde"),
+        "drawdown_usd": str(chosen.get("drawdown_usd") or "0"),
+    }
+
+
+def build_calibration(
+    events: list[dict],
+    promo: PromotionConfig,
+    config: DeskConfig,
+    now: datetime,
+    pair_store: dict | None = None,
+) -> dict:
+    store = update_pair_store(pair_store, events)
+    periodos_public = {}
+    for key, period in store["periodos"].items():
+        periodos_public[key] = {
+            "threshold_version": period.get("threshold_version"),
+            "cuenta_como_evidencia": bool(period.get("cuenta_como_evidencia")),
+            "pnl_usd": str(period.get("pnl_usd") or "0"),
+            "cierres": int(period.get("cierres") or 0),
+            "desde": period.get("desde"),
+            "drawdown_usd": str(period.get("drawdown_usd") or "0"),
+            "preguntas": _score_questions(period.get("pares") or {}),
+        }
+    snap = evidence_snapshot({"periodos": periodos_public})
+    evidence_key = None if snap["threshold_version"] is None else str(snap["threshold_version"])
+    evidence_pares = {}
+    if evidence_key and evidence_key in store["periodos"]:
+        evidence_pares = store["periodos"][evidence_key].get("pares") or {}
+    questions = _score_questions(evidence_pares)
     return {
         "fecha": _cdmx_date(now),
         "generado_en": iso(now),
         "zona": "America/Mexico_City",
         "modelo": config.judge.model,
         "preguntas": questions,
-        "bots": per_bot,
+        "periodos": periodos_public,
+        "evidencia": snap,
+        "bots": _readiness_by_bot(questions, promo, events, config, now),
         "agregados": _aggregates(questions),
         "pair_store": store,
     }
@@ -272,7 +332,7 @@ def build_daily(events: list[dict], config: DeskConfig, now: datetime, book: dic
     if judge_status.get("no_key"):
         alerts.append("juez_sin_llave")
     entradas = sum(decision_actions.get(action, 0) for action in ("long", "short", "quote"))
-    if sum(decisions.values()) > 0 and entradas == 0:
+    if sum(decisions.values()) >= SIN_ENTRADAS_MIN_DECISIONES and entradas == 0:
         alerts.append("sin_entradas")
     price = config.judge.price_usd_per_million_input_tokens
     spend = float(Decimal(tokens) * price / Decimal(1_000_000))
@@ -411,8 +471,17 @@ def render_calibration_md(report: dict) -> str:
         f"Hora de la Ciudad de México (America/Mexico_City): {report['generado_en']}.",
         "Brier compara la probabilidad dicha con lo que pasó. La curva de confiabilidad agrupa esas probabilidades de 10 en 10 puntos.",
         "listo_para_simulado es una recomendación. El modo no cambia sin OK de Pedro.",
+        "El veredicto y listo_para_simulado usan solo el periodo que cuenta como evidencia.",
+        "La version 2 es la curva identidad y no entra en el PnL ni en el skill.",
         "",
     ]
+    lines.append("## Periodos por version de politica")
+    for key, body in (report.get("periodos") or {}).items():
+        flag = "sí" if body.get("cuenta_como_evidencia") else "no"
+        lines.append(
+            f"- version {key}: evidencia {flag}, cierres {body.get('cierres', 0)}, PnL {body.get('pnl_usd', '0')} USD."
+        )
+    lines.append("")
     for bot, item in report["bots"].items():
         lines.append(f"## {bot}: listo_para_simulado = {item['listo_para_simulado']}")
         for motive in item["motivos"]:
@@ -568,15 +637,102 @@ def _aggregates(questions: dict) -> dict:
     return rows
 
 
-def update_pair_store(store: dict | None, events: list[dict]) -> dict:
-    """Acumula pares (probabilidad, acierto) sin contar dos veces el mismo evento."""
-    current = {
-        "ids": list((store or {}).get("ids") or []),
-        "pares": {
-            bot: {qid: [list(row) for row in rows] for qid, rows in body.items()}
-            for bot, body in ((store or {}).get("pares") or {}).items()
-        },
+def _blank_period(version: int | None, evidencia: bool) -> dict:
+    return {
+        "threshold_version": version,
+        "cuenta_como_evidencia": evidencia,
+        "pares": {},
+        "pnl_usd": "0",
+        "cierres": 0,
+        "desde": None,
+        "pnl_pico_usd": "0",
+        "drawdown_usd": "0",
     }
+
+
+def _copy_period(body: dict) -> dict:
+    period = _blank_period(body.get("threshold_version"), bool(body.get("cuenta_como_evidencia")))
+    period["pnl_usd"] = str(body.get("pnl_usd") or "0")
+    period["cierres"] = int(body.get("cierres") or 0)
+    period["desde"] = body.get("desde")
+    period["pnl_pico_usd"] = str(body.get("pnl_pico_usd") or "0")
+    period["drawdown_usd"] = str(body.get("drawdown_usd") or "0")
+    period["pares"] = {
+        bot: {qid: [list(row) for row in rows] for qid, rows in questions.items()}
+        for bot, questions in (body.get("pares") or {}).items()
+    }
+    if period["threshold_version"] == IDENTITY_POLICY_VERSION:
+        period["cuenta_como_evidencia"] = False
+    return period
+
+
+def _period_identity(payload: dict | None) -> tuple[str, int | None, bool]:
+    raw = (payload or {}).get("threshold_version")
+    if raw is None:
+        return "sin_version", None, False
+    try:
+        version = int(raw)
+    except (TypeError, ValueError):
+        return "sin_version", None, False
+    if version <= 0 or version == IDENTITY_POLICY_VERSION:
+        # La version 2 es la curva identidad: no cuenta aunque el evento diga que sí.
+        key = "sin_version" if version <= 0 else str(version)
+        number = None if version <= 0 else version
+        return key, number, False
+    return str(version), version, (payload or {}).get("cuenta_como_evidencia") is True
+
+
+def _touch_period(current: dict, payload: dict | None) -> dict:
+    key, version, evidencia = _period_identity(payload)
+    period = current["periodos"].get(key)
+    if period is None:
+        period = _blank_period(version, evidencia)
+        current["periodos"][key] = period
+    elif not evidencia:
+        period["cuenta_como_evidencia"] = False
+    return period
+
+
+def _note_when(period: dict, when: str | None) -> None:
+    if not when:
+        return
+    if period["desde"] is None or when < period["desde"]:
+        period["desde"] = when
+
+
+def _add_close(period: dict, pnl: Decimal, when: str | None) -> None:
+    total = Decimal(str(period["pnl_usd"])) + pnl
+    peak = Decimal(str(period["pnl_pico_usd"]))
+    if total > peak:
+        peak = total
+    drawdown = peak - total
+    if drawdown < 0:
+        drawdown = Decimal("0")
+    worst = Decimal(str(period["drawdown_usd"]))
+    if drawdown > worst:
+        worst = drawdown
+    period["pnl_usd"] = format(total, "f")
+    period["pnl_pico_usd"] = format(peak, "f")
+    period["drawdown_usd"] = format(worst, "f")
+    period["cierres"] = int(period["cierres"]) + 1
+    _note_when(period, when)
+
+
+def update_pair_store(store: dict | None, events: list[dict]) -> dict:
+    """Acumula pares y cierres por version de política, sin contar dos veces el mismo evento."""
+    incoming = store or {}
+    current = {
+        "ids": list(incoming.get("ids") or []),
+        "periodos": {str(key): _copy_period(body) for key, body in (incoming.get("periodos") or {}).items()},
+    }
+    legacy = incoming.get("pares")
+    if legacy and not current["periodos"]:
+        # Pares guardados antes de separar periodos. No son evidencia.
+        current["periodos"]["sin_version"] = _blank_period(None, False)
+        current["periodos"]["sin_version"]["pares"] = {
+            bot: {qid: [list(row) for row in rows] for qid, rows in body.items()}
+            for bot, body in legacy.items()
+        }
     seen = set(current["ids"])
     outcomes: dict[tuple[str, str, str], str] = {}
     for event in events:
@@ -589,11 +745,23 @@ def update_pair_store(store: dict | None, events: list[dict]) -> dict:
         if qid and source:
             outcomes[(bot, source, qid)] = str(payload.get("outcome"))
     for event in events:
-        if event.get("event_type") != "BatteryAnswered":
+        kind = event.get("event_type")
+        payload = event.get("payload") or {}
+        if kind == "PositionClosed":
+            key = f"cierre:{event.get('event_id')}"
+            if key in seen:
+                continue
+            seen.add(key)
+            current["ids"].append(key)
+            period = _touch_period(current, payload)
+            _add_close(period, Decimal(str(payload.get("pnl_usd") or "0")), event.get("occurred_at"))
+            continue
+        if kind != "BatteryAnswered":
             continue
         bot = event.get("bot") or ""
         if bot not in POLICY_QUESTIONS:
             continue
+        period = None
         for question in battery_for(bot):
             qid = question.id
             key = f"{event.get('event_id')}:{qid}"
@@ -607,7 +775,10 @@ def update_pair_store(store: dict | None, events: list[dict]) -> dict:
                 continue
             seen.add(key)
             current["ids"].append(key)
-            current["pares"].setdefault(bot, {}).setdefault(qid, []).append([pair[0], pair[1]])
+            if period is None:
+                period = _touch_period(current, payload)
+                _note_when(period, event.get("occurred_at"))
+            period["pares"].setdefault(bot, {}).setdefault(qid, []).append([pair[0], pair[1]])
     if len(current["ids"]) > PAIR_ID_CAP:
         current["ids"] = current["ids"][-PAIR_ID_CAP:]
     return current
@@ -623,6 +794,7 @@ def apply_verdict(
     capital_usd: Decimal,
     max_drawdown_usd: Decimal,
     now: datetime,
+    pnl_usd: Decimal | None = None,
 ) -> dict:
     """Go / no-go de la estrategia. No cambia el modo de ningún bot."""
     skills = []
@@ -640,7 +812,7 @@ def apply_verdict(
     rate = (closed_trades / days) if days >= 1 / 24 and closed_trades else 0.0
     remaining = max(int(promo.min_closed_trades) - int(closed_trades), 0)
     days_left = (remaining / rate) if rate > 0 else None
-    pnl = Decimal(str(daily.get("pnl_acumulado_usd") or "0"))
+    pnl = pnl_usd if pnl_usd is not None else Decimal(str(daily.get("pnl_acumulado_usd") or "0"))
     # El corte usa el peor pico-a-valle guardado, no el hueco que queda ahora
     # si el capital ya rebotó.
     drawdown_pct = (max_drawdown_usd / capital_usd) if capital_usd else Decimal("0")
@@ -677,7 +849,7 @@ def apply_verdict(
         "GO tentativo exige la muestra, PnL > 0 y skill ≥ "
         f"{promo.min_brier_skill}. NO-GO si, ya con la muestra, el PnL no es positivo o el skill es ≤ 0, "
         "o antes si el drawdown pasa el corte. GO tentativo no autoriza dinero real ni un broker real. "
-        "Un periodo operado con curva identidad no cuenta como evidencia de edge."
+        + _evidence_note(calibration)
     )
     daily["veredicto"] = {
         "estado": estado,
@@ -693,6 +865,19 @@ def apply_verdict(
         "nota": nota,
     }
     return daily
+
+
+def _evidence_note(calibration: dict) -> str:
+    version = (calibration.get("evidencia") or {}).get("threshold_version")
+    if version is None:
+        return (
+            "No hay un periodo que cuente como evidencia. "
+            "El PnL y el skill de la version 2 (curva identidad) no entran en este veredicto."
+        )
+    return (
+        f"Este veredicto usa solo la version {version}. "
+        "La version 2, con curva identidad, no entra en el PnL ni en el skill."
+    )
 
 
 def _cost_ceiling(config: DeskConfig) -> dict:

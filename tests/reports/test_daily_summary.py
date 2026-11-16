@@ -7,21 +7,26 @@ from mesa_trading.reports.build import build_daily, render_daily_md
 NOW = datetime(2026, 11, 6, 18, 30, tzinfo=timezone.utc)
 
 
-def test_sin_entradas_when_every_decision_is_a_hold():
-    events = [
-        {
-            "event_type": "PolicyDecided",
-            "occurred_at": "2026-11-06T17:55:00.000000Z",
-            "bot": "gambler",
-            "mode": "simulated",
-            "payload": {"action": "hold", "reason": "sin_calibracion_aprobada"},
-            "event_id": "p",
-            "correlation_id": "c",
-        }
-    ]
-    report = build_daily(events, load_desk(repo_root() / "config" / "desk.yaml"), NOW)
-    assert report["decisiones_por_accion"]["hold"] == 1
-    assert "sin_entradas" in report["alertas"]
+def _hold(index: int) -> dict:
+    return {
+        "event_type": "PolicyDecided",
+        "occurred_at": "2026-11-06T17:55:00.000000Z",
+        "bot": "gambler",
+        "mode": "simulated",
+        "payload": {"action": "hold", "reason": "sin_calibracion_aprobada"},
+        "event_id": f"p{index}",
+        "correlation_id": "c",
+    }
+
+
+def test_sin_entradas_needs_a_minimum_of_decisions():
+    config = load_desk(repo_root() / "config" / "desk.yaml")
+    quiet = build_daily([_hold(0)], config, NOW)
+    assert quiet["decisiones_por_accion"]["hold"] == 1
+    assert "sin_entradas" not in quiet["alertas"]
+    loud = build_daily([_hold(index) for index in range(50)], config, NOW)
+    assert loud["decisiones_por_accion"]["hold"] == 50
+    assert "sin_entradas" in loud["alertas"]
 
 
 def test_a24_daily_summary_is_after_costs_and_in_cdmx():

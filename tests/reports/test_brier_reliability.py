@@ -51,7 +51,9 @@ def test_a23_brier_matches_hand_calculation():
         load_desk(repo_root() / "config" / "desk.yaml"),
         __import__("tests.helpers", fromlist=["T0"]).T0,
     )
-    question = report["preguntas"]["gambler"]["presion_compra"]
+    question = report["periodos"]["sin_version"]["preguntas"]["gambler"]["presion_compra"]
     assert question["brier"] == pytest.approx(0.04)
     assert question["brier_base"] == pytest.approx(0.25)
     assert question["skill"] == pytest.approx(0.84)
+    assert report["preguntas"]["gambler"]["presion_compra"]["n"] == 0
+    assert report["evidencia"]["cierres"] == 0

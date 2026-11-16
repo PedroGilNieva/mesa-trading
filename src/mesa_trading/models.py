@@ -65,6 +65,8 @@ class Position(BaseModel):
     fees_usd: Decimal = Decimal("0")
     slippage_usd: Decimal = Decimal("0")
     kind: Literal["spot", "perp"] = "spot"
+    threshold_version: int = 0
+    cuenta_como_evidencia: bool = False
 
 
 class BookState(BaseModel):

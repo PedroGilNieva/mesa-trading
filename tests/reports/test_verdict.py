@@ -2,7 +2,14 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from mesa_trading.config import load_desk, load_promotion, repo_root
-from mesa_trading.reports.build import PAIR_ID_CAP, apply_verdict, build_calibration, build_daily, update_pair_store
+from mesa_trading.reports.build import (
+    PAIR_ID_CAP,
+    apply_verdict,
+    build_calibration,
+    build_daily,
+    evidence_snapshot,
+    update_pair_store,
+)
 
 NOW = datetime(2026, 11, 20, 18, tzinfo=timezone.utc)
 
@@ -77,7 +84,7 @@ def test_verdict_no_go_on_drawdown_and_go_when_sample_is_good():
         )
     store = update_pair_store(None, events)
     again = update_pair_store(store, events)
-    assert len(again["pares"]["gambler"]["presion_compra"]) == 30
+    assert len(again["periodos"]["sin_version"]["pares"]["gambler"]["presion_compra"]) == 30
     calibration = build_calibration(events, promo, config, NOW, pair_store=store)
     started = (NOW - timedelta(days=20)).strftime("%Y-%m-%dT%H:%M:%S.000000Z")
     blocked = apply_verdict(
@@ -156,3 +163,109 @@ def test_flat_pnl_after_the_sample_is_no_go():
         now=NOW,
     )
     assert report["veredicto"]["estado"] == "no_go"
+
+
+def _resolved(index: str, version: int, flag: bool, prob: float, outcome: str, when: str) -> list[dict]:
+    return [
+        {
+            "event_id": f"b{index}",
+            "event_type": "BatteryAnswered",
+            "occurred_at": when,
+            "bot": "gambler",
+            "mode": "simulated",
+            "payload": {
+                "threshold_version": version,
+                "cuenta_como_evidencia": flag,
+                "answers": [{"question_id": "regimen", "probs": {"si": prob, "no": 1 - prob}}],
+            },
+        },
+        {
+            "event_id": f"o{index}",
+            "event_type": "OutcomeResolved",
+            "occurred_at": when,
+            "bot": "gambler",
+            "mode": "simulated",
+            "payload": {"question_id": "regimen", "outcome": outcome, "source_event": f"b{index}"},
+        },
+    ]
+
+
+def test_identity_period_does_not_count_toward_a_real_money_go():
+    promo = load_promotion(repo_root() / "config" / "promotion.yaml")
+    config = load_desk(repo_root() / "config" / "desk.yaml")
+    when_v2 = "2026-11-01T17:00:00.000000Z"
+    events = [
+        {
+            "event_id": "loss",
+            "event_type": "PositionClosed",
+            "occurred_at": when_v2,
+            "bot": "gambler",
+            "mode": "simulated",
+            "payload": {"pnl_usd": "-500", "threshold_version": 2, "cuenta_como_evidencia": True},
+        }
+    ]
+    for index, (prob, outcome) in enumerate([(0.8, "si"), (0.8, "si"), (0.2, "no"), (0.2, "no")]):
+        events.extend(_resolved(f"v2-{index}", 2, True, prob, outcome, when_v2))
+    only_identity = build_calibration(events, promo, config, NOW)
+    blocked = evidence_snapshot(only_identity)
+    assert only_identity["periodos"]["2"]["cuenta_como_evidencia"] is False
+    tampered = only_identity["pair_store"]
+    tampered["periodos"]["2"]["cuenta_como_evidencia"] = True
+    reloaded = update_pair_store(tampered, [])
+    assert reloaded["periodos"]["2"]["cuenta_como_evidencia"] is False
+    assert only_identity["periodos"]["2"]["pnl_usd"] == "-500"
+    assert Decimal(only_identity["periodos"]["2"]["drawdown_usd"]) == Decimal("500")
+    assert only_identity["periodos"]["2"]["preguntas"]["gambler"]["regimen"]["n"] == 4
+    assert only_identity["preguntas"]["gambler"]["regimen"]["n"] == 0
+    assert blocked["cierres"] == 0
+    assert blocked["pnl_usd"] == "0"
+    assert blocked["drawdown_usd"] == "0"
+    held = apply_verdict(
+        _daily(),
+        only_identity,
+        promo,
+        closed_trades=blocked["cierres"],
+        started_at=blocked["desde"],
+        capital_usd=Decimal("1000"),
+        max_drawdown_usd=Decimal(blocked["drawdown_usd"]),
+        now=NOW,
+        pnl_usd=Decimal(blocked["pnl_usd"]),
+    )
+    assert held["veredicto"]["estado"] == "insuficiente"
+    assert "version 2" in held["veredicto"]["nota"]
+
+    started = (NOW - timedelta(days=20)).strftime("%Y-%m-%dT%H:%M:%S.000000Z")
+    for index in range(200):
+        events.append(
+            {
+                "event_id": f"c{index}",
+                "event_type": "PositionClosed",
+                "occurred_at": started,
+                "bot": "gambler",
+                "mode": "simulated",
+                "payload": {"pnl_usd": "0.10", "threshold_version": 3, "cuenta_como_evidencia": True},
+            }
+        )
+    for index, (prob, outcome) in enumerate([(0.8, "si"), (0.8, "si"), (0.2, "no"), (0.2, "no")]):
+        events.extend(_resolved(f"v3-{index}", 3, True, prob, outcome, started))
+    calibration = build_calibration(events, promo, config, NOW)
+    snap = evidence_snapshot(calibration)
+    assert snap["threshold_version"] == 3
+    assert snap["cierres"] == 200
+    assert Decimal(snap["pnl_usd"]) == Decimal("20.00")
+    assert Decimal(snap["drawdown_usd"]) == Decimal("0")
+    assert calibration["preguntas"]["gambler"]["regimen"]["n"] == 4
+    opened = apply_verdict(
+        _daily(),
+        calibration,
+        promo,
+        closed_trades=snap["cierres"],
+        started_at=snap["desde"],
+        capital_usd=Decimal("1000"),
+        max_drawdown_usd=Decimal(snap["drawdown_usd"]),
+        now=NOW,
+        pnl_usd=Decimal(snap["pnl_usd"]),
+    )
+    assert opened["veredicto"]["estado"] == "go_tentativo"
+    assert opened["veredicto"]["pnl_acumulado_usd"] == "20.00"
+    assert "version 3" in opened["veredicto"]["nota"]

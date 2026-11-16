@@ -18,7 +18,7 @@ from mesa_trading.events import make_event
 from mesa_trading.filter.funnel import bank_until, cheap, hard, still_banked
 from mesa_trading.logs.sink import LogSink
 from mesa_trading.models import Order, Position, Proposal
-from mesa_trading.policy.decide import decide
+from mesa_trading.policy.decide import decide, policy_counts_as_evidence
 from mesa_trading.questions.catalog import battery_for, realized_outcome
 from mesa_trading.risk.engine import RiskFacts, evaluate
 from mesa_trading.state.snapshot import LIVE_QUOTE_SKEW, build_snapshot
@@ -334,6 +334,8 @@ def _submit(env, state, proposal: Proposal, snapshot, cycle_id, now, mode, book=
         fees_usd=fill.fee_usd,
         slippage_usd=fill.slippage_usd,
         kind=proposal.kind,
+        threshold_version=proposal.threshold_version,
+        cuenta_como_evidencia=policy_counts_as_evidence(env.policy),
     )
     open_position(state, position, fill.fee_usd, fill.slippage_usd)
     state.seen_orders.append(order.client_order_id)
@@ -345,7 +347,13 @@ def _submit(env, state, proposal: Proposal, snapshot, cycle_id, now, mode, book=
         now,
         bot=proposal.bot,
         mode=mode,
-        payload={"market": market, "side": position.side, "notional_usd": str(position.notional_usd)},
+        payload={
+            "market": market,
+            "side": position.side,
+            "notional_usd": str(position.notional_usd),
+            "threshold_version": position.threshold_version,
+            "cuenta_como_evidencia": position.cuenta_como_evidencia,
+        },
         parts=(market,),
     )
     return 1
@@ -421,7 +429,13 @@ def _close(env, state, cycle_id, now, mode, reason, snapshot, book=None) -> int:
         now,
         bot=pos.bot,
         mode=mode,
-        payload={"market": pos.market, "pnl_usd": str(pnl), "reason": reason},
+        payload={
+            "market": pos.market,
+            "pnl_usd": str(pnl),
+            "reason": reason,
+            "threshold_version": pos.threshold_version,
+            "cuenta_como_evidencia": pos.cuenta_como_evidencia,
+        },
         parts=(pos.market, reason),
     )
     _ = broker_kwargs_price
@@ -493,6 +507,8 @@ def _record_battery(env, state, response, bot, mode, market, cycle_id, now, snap
         "latency_ms": response.get("latency_ms", 0),
         "reason": response.get("reason"),
         "snapshot": snapshot,
+        "threshold_version": int((env.policy or {}).get("version") or 0),
+        "cuenta_como_evidencia": policy_counts_as_evidence(env.policy),
     }
     if status == "answered":
         event = _emit(env, "BatteryAnswered", cycle_id, now, bot=bot, mode=mode, payload=payload, parts=(market,))
