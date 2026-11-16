@@ -7,8 +7,9 @@
 # House sí puede cotizar (orden límite al 25% del capital). El SimBroker no la
 # llena si no hay una vela posterior que cruce el límite; hasta ver esos fills,
 # las cotizaciones no son evidencia.
-# cuenta_como_evidencia queda en false: la version 3 sigue siendo la curva
-# identidad de simulado. No entra en el PnL ni en el skill de un GO.
+# cuenta_como_evidencia queda en false, y además la version 3 está en el
+# candado duro junto con la 2: no cuenta para un GO aunque alguien marque
+# el flag o las curvas como aprobadas.
 version: 3
 cuenta_como_evidencia: false
 curvas:

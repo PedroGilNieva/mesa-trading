@@ -12,9 +12,17 @@ from mesa_trading.config import default_policy_path
 from mesa_trading.models import Proposal
 
 
-# La version 2 es el periodo de staging con curva identidad. No cuenta como
-# evidencia de edge aunque un evento la marque cuenta_como_evidencia.
+# 2: curva identidad. 3: los mismos umbrales recalibrados, todavía en simulado.
+# Ninguna cuenta para un GO aunque el flag o las curvas digan que sí.
+SIMULATION_POLICY_VERSIONS = frozenset({2, 3})
 IDENTITY_POLICY_VERSION = 2
+
+
+def is_simulation_policy_version(version: Any) -> bool:
+    try:
+        return int(version) in SIMULATION_POLICY_VERSIONS
+    except (TypeError, ValueError):
+        return False
 
 
 def load_policy(path: Path | None = None) -> dict[str, Any]:
@@ -30,7 +38,7 @@ def policy_counts_as_evidence(policy: dict[str, Any] | None) -> bool:
         version = int(policy.get("version") or 0)
     except (TypeError, ValueError):
         return False
-    if version == 0 or version == IDENTITY_POLICY_VERSION:
+    if version == 0 or is_simulation_policy_version(version):
         return False
     if policy.get("cuenta_como_evidencia") is not True:
         return False

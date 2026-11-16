@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from mesa_trading.config import load_desk, load_promotion, repo_root
+from mesa_trading.policy.decide import policy_counts_as_evidence
 from mesa_trading.reports.build import (
     PAIR_ID_CAP,
     apply_verdict,
@@ -245,14 +246,14 @@ def test_identity_period_does_not_count_toward_a_real_money_go():
                 "occurred_at": started,
                 "bot": "gambler",
                 "mode": "simulated",
-                "payload": {"pnl_usd": "0.10", "threshold_version": 3, "cuenta_como_evidencia": True},
+                "payload": {"pnl_usd": "0.10", "threshold_version": 4, "cuenta_como_evidencia": True},
             }
         )
     for index, (prob, outcome) in enumerate([(0.8, "si"), (0.8, "si"), (0.2, "no"), (0.2, "no")]):
-        events.extend(_resolved(f"v3-{index}", 3, True, prob, outcome, started))
+        events.extend(_resolved(f"v4-{index}", 4, True, prob, outcome, started))
     calibration = build_calibration(events, promo, config, NOW)
     snap = evidence_snapshot(calibration)
-    assert snap["threshold_version"] == 3
+    assert snap["threshold_version"] == 4
     assert snap["cierres"] == 200
     assert Decimal(snap["pnl_usd"]) == Decimal("20.00")
     assert Decimal(snap["drawdown_usd"]) == Decimal("0")
@@ -270,11 +271,11 @@ def test_identity_period_does_not_count_toward_a_real_money_go():
     )
     assert opened["veredicto"]["estado"] == "go_tentativo"
     assert opened["veredicto"]["pnl_acumulado_usd"] == "20.00"
-    assert "version 3" in opened["veredicto"]["nota"]
+    assert "version 4" in opened["veredicto"]["nota"]
 
 
 def test_a_newer_period_that_does_not_count_blocks_the_previous_one():
-    """v3 podía ser GO. v4 posterior, sin evidencia, deja el veredicto en insuficiente."""
+    """Una version que cuenta, seguida de otra posterior que no, deja el veredicto en insuficiente."""
     promo = load_promotion(repo_root() / "config" / "promotion.yaml")
     config = load_desk(repo_root() / "config" / "desk.yaml")
     started = (NOW - timedelta(days=20)).strftime("%Y-%m-%dT%H:%M:%S.000000Z")
@@ -287,29 +288,29 @@ def test_a_newer_period_that_does_not_count_blocks_the_previous_one():
                 "occurred_at": started,
                 "bot": "gambler",
                 "mode": "simulated",
-                "payload": {"pnl_usd": "0.10", "threshold_version": 3, "cuenta_como_evidencia": True},
+                "payload": {"pnl_usd": "0.10", "threshold_version": 4, "cuenta_como_evidencia": True},
             }
         )
     for index, (prob, outcome) in enumerate([(0.8, "si"), (0.8, "si"), (0.2, "no"), (0.2, "no")]):
-        events.extend(_resolved(f"v3-{index}", 3, True, prob, outcome, started))
+        events.extend(_resolved(f"v4b-{index}", 4, True, prob, outcome, started))
     events.append(
         {
-            "event_id": "v4",
+            "event_id": "v5",
             "event_type": "PositionClosed",
             "occurred_at": "2026-11-20T17:00:00.000000Z",
             "bot": "gambler",
             "mode": "simulated",
-            "payload": {"pnl_usd": "999", "threshold_version": 4, "cuenta_como_evidencia": False},
+            "payload": {"pnl_usd": "999", "threshold_version": 5, "cuenta_como_evidencia": False},
         }
     )
     calibration = build_calibration(events, promo, config, NOW)
     snap = evidence_snapshot(calibration)
-    assert snap["threshold_version"] == 4
+    assert snap["threshold_version"] == 5
     assert snap["cuenta_como_evidencia"] is False
     assert snap["cierres"] == 0
     assert snap["pnl_usd"] == "0"
     assert calibration["preguntas"]["gambler"]["regimen"]["n"] == 0
-    assert calibration["periodos"]["3"]["cierres"] == 200
+    assert calibration["periodos"]["4"]["cierres"] == 200
     daily = _daily()
     daily["pnl_acumulado_usd"] = "999"
     report = apply_verdict(
@@ -353,3 +354,57 @@ def test_a_newer_period_that_does_not_count_blocks_the_previous_one():
     assert forced["threshold_version"] == 2
     assert forced["cuenta_como_evidencia"] is False
     assert forced["cierres"] == 0
+
+
+def test_simulation_v3_does_not_count_even_if_curves_are_marked_approved():
+    """Identidad de la version 3, con flag y curvas aprobadas, no es un GO."""
+    marked = {
+        "version": 3,
+        "cuenta_como_evidencia": True,
+        "curvas": {
+            "gambler.regimen": {"a": "1", "b": "0", "aprobada": True, "fuente": "informe"},
+            "gambler.setup": {"a": "1.2", "b": "-0.1", "aprobada": True, "fuente": "informe"},
+        },
+    }
+    assert policy_counts_as_evidence(marked) is False
+    promo = load_promotion(repo_root() / "config" / "promotion.yaml")
+    config = load_desk(repo_root() / "config" / "desk.yaml")
+    started = (NOW - timedelta(days=20)).strftime("%Y-%m-%dT%H:%M:%S.000000Z")
+    events = []
+    for index in range(200):
+        events.append(
+            {
+                "event_id": f"s{index}",
+                "event_type": "PositionClosed",
+                "occurred_at": started,
+                "bot": "gambler",
+                "mode": "simulated",
+                "payload": {"pnl_usd": "1", "threshold_version": 3, "cuenta_como_evidencia": True},
+            }
+        )
+    for index, (prob, outcome) in enumerate([(0.8, "si"), (0.8, "si"), (0.2, "no"), (0.2, "no")]):
+        events.extend(_resolved(f"sv3-{index}", 3, True, prob, outcome, started))
+    calibration = build_calibration(events, promo, config, NOW)
+    assert calibration["periodos"]["3"]["cuenta_como_evidencia"] is False
+    tampered = calibration["pair_store"]
+    tampered["periodos"]["3"]["cuenta_como_evidencia"] = True
+    assert update_pair_store(tampered, [])["periodos"]["3"]["cuenta_como_evidencia"] is False
+    snap = evidence_snapshot(calibration)
+    assert snap["threshold_version"] == 3
+    assert snap["cuenta_como_evidencia"] is False
+    assert snap["cierres"] == 0
+    assert calibration["preguntas"]["gambler"]["regimen"]["n"] == 0
+    report = apply_verdict(
+        _daily(),
+        calibration,
+        promo,
+        closed_trades=snap["cierres"],
+        started_at=snap["desde"],
+        capital_usd=Decimal("1000"),
+        max_drawdown_usd=Decimal(snap["drawdown_usd"]),
+        now=NOW,
+        pnl_usd=Decimal(snap["pnl_usd"]),
+    )
+    assert report["veredicto"]["estado"] == "insuficiente"
+    assert "version 3" in report["veredicto"]["nota"]
+    assert "no cuenta" in report["veredicto"]["nota"]

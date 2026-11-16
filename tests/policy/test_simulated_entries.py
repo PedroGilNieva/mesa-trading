@@ -75,11 +75,20 @@ def test_identity_curve_only_applies_in_simulated():
     lying["cuenta_como_evidencia"] = True
     assert policy_counts_as_evidence(lying) is False
     approved_policy = {
-        "version": 3,
+        "version": 4,
         "cuenta_como_evidencia": True,
         "curvas": {"gambler.regimen": {"a": "1.2", "b": "-0.1", "aprobada": True, "fuente": "informe"}},
     }
     assert policy_counts_as_evidence(approved_policy) is True
+    simulation_marked_approved = {
+        "version": 3,
+        "cuenta_como_evidencia": True,
+        "curvas": {
+            "gambler.regimen": {"a": "1", "b": "0", "aprobada": True, "fuente": "informe"},
+            "gambler.setup": {"a": "1.2", "b": "-0.1", "aprobada": True, "fuente": "informe"},
+        },
+    }
+    assert policy_counts_as_evidence(simulation_marked_approved) is False
     assert policy_counts_as_evidence({"version": "no"}) is False
     assert policy_counts_as_evidence({"version": 3, "cuenta_como_evidencia": True, "curvas": {}}) is False
     assert policy_counts_as_evidence({"version": 3, "cuenta_como_evidencia": True, "curvas": {"x": "no"}}) is False

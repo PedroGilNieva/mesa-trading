@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from mesa_trading.config import DeskConfig, PromotionConfig
 from mesa_trading.constants import ESTIMATED_INPUT_TOKENS_PER_CALL
-from mesa_trading.policy.decide import IDENTITY_POLICY_VERSION
+from mesa_trading.policy.decide import is_simulation_policy_version
 from mesa_trading.questions.catalog import battery_for
 from mesa_trading.filter.funnel import silent_step_alerts
 from mesa_trading.util import as_utc, iso
@@ -213,8 +213,8 @@ def _version_rank(body: dict) -> int:
 def evidence_snapshot(calibration: dict) -> dict:
     """El GO mira solo el periodo de threshold_version más alto.
 
-    Si ese periodo no cuenta (version 2, sin aprobar, o sin version), el
-    veredicto queda sin evidencia. No se usa un periodo anterior.
+    Si ese periodo no cuenta (versiones 2 y 3 de simulación, sin aprobar,
+    o sin version), el veredicto queda sin evidencia. No se usa uno anterior.
     """
     chosen = None
     rank = -2
@@ -231,7 +231,7 @@ def evidence_snapshot(calibration: dict) -> dict:
     counts = (
         chosen is not None
         and number is not None
-        and number != IDENTITY_POLICY_VERSION
+        and not is_simulation_policy_version(number)
         and bool(chosen.get("cuenta_como_evidencia"))
     )
     if not counts:
@@ -687,7 +687,7 @@ def _copy_period(body: dict) -> dict:
         bot: {qid: [list(row) for row in rows] for qid, rows in questions.items()}
         for bot, questions in (body.get("pares") or {}).items()
     }
-    if period["threshold_version"] == IDENTITY_POLICY_VERSION:
+    if is_simulation_policy_version(period["threshold_version"]):
         period["cuenta_como_evidencia"] = False
     return period
 
@@ -700,8 +700,8 @@ def _period_identity(payload: dict | None) -> tuple[str, int | None, bool]:
         version = int(raw)
     except (TypeError, ValueError):
         return "sin_version", None, False
-    if version <= 0 or version == IDENTITY_POLICY_VERSION:
-        # La version 2 es la curva identidad: no cuenta aunque el evento diga que sí.
+    if version <= 0 or is_simulation_policy_version(version):
+        # 2 y 3 son simulación: no cuentan aunque el evento las marque.
         key = "sin_version" if version <= 0 else str(version)
         number = None if version <= 0 else version
         return key, number, False
@@ -903,17 +903,17 @@ def _evidence_note(calibration: dict) -> str:
     if version is None:
         return (
             "No hay un periodo que cuente como evidencia. "
-            "El PnL y el skill de la version 2 (curva identidad) no entran en este veredicto."
+            "El PnL y el skill de la version 2 y la version 3 (simulación) no entran en este veredicto."
         )
     if not evidencia.get("cuenta_como_evidencia"):
         return (
             f"El periodo más nuevo es la version {version} y no cuenta como evidencia. "
             "El veredicto no vuelve a un periodo anterior. "
-            "La version 2, con curva identidad, tampoco entra en el PnL ni en el skill."
+            "La version 2 y la version 3, de simulación, tampoco entran en el PnL ni en el skill."
         )
     return (
         f"Este veredicto usa solo la version {version}. "
-        "La version 2, con curva identidad, no entra en el PnL ni en el skill."
+        "La version 2 y la version 3, de simulación, no entran en el PnL ni en el skill."
     )
 
 
