@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +15,17 @@ from mesa_trading.models import Proposal
 def load_policy(path: Path | None = None) -> dict[str, Any]:
     target = path or default_policy_path()
     return yaml.safe_load(target.read_text(encoding="utf-8"))
+
+
+def curves_from_policy(policy: dict[str, Any] | None) -> dict[str, dict[str, str]]:
+    """Curvas declaradas en la política. Vacío = el simulado no opera."""
+    raw = (policy or {}).get("curvas") or {}
+    out = {}
+    for key, body in raw.items():
+        if not isinstance(body, dict) or "a" not in body or "b" not in body:
+            continue
+        out[str(key)] = {"a": str(body["a"]), "b": str(body["b"])}
+    return out
 
 
 def platt(probability: Decimal, a: Decimal, b: Decimal) -> Decimal:
@@ -98,7 +109,9 @@ def _score(answer: dict) -> Decimal | None:
 
 
 def _size(capital: Decimal, pct: Decimal) -> Decimal:
-    return (capital * pct).quantize(Decimal("0.01"))
+    # Hacia abajo: redondear al centavo de arriba deja el nocional por encima
+    # del 25% y el veto de posicion_maxima bloquea todo lo que sigue a la primera pérdida.
+    return (capital * pct).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
 
 
 def _hold(bot, market, kind, version, rules, reason) -> Proposal:
