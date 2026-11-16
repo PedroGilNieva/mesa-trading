@@ -1,6 +1,8 @@
 """GET /decisiones/hoy cuenta el día y no devuelve respuestas ni secretos."""
 
 import json
+import threading
+import time
 from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
@@ -8,7 +10,7 @@ from fastapi.testclient import TestClient
 from mesa_trading.api.app import create_app
 from mesa_trading.policy.decide import gambler_blockers, load_policy
 from mesa_trading.reports.decisions import (
-    CACHE_TTL_S,
+    ERROR_TTL_S,
     MAX_LOG_OBJECTS,
     _project_log,
     cached_decision_report,
@@ -158,6 +160,127 @@ def test_cached_report_does_not_touch_storage_again(tmp_path):
     assert root.lists > listed
 
 
+def test_concurrent_misses_read_storage_once(tmp_path):
+    clear_decision_cache()
+    now = datetime(2026, 11, 16, 18, tzinfo=timezone.utc)
+    day = "2026-11-16"
+
+    class Slow(LocalRoot):
+        def __init__(self, root):
+            super().__init__(root)
+            self.lists = 0
+            self.reads = 0
+            self._mu = threading.Lock()
+
+        def list_prefix(self, prefix: str, max_results: int | None = None):
+            with self._mu:
+                self.lists += 1
+            time.sleep(0.05)
+            return super().list_prefix(prefix, max_results=max_results)
+
+        def read_text(self, key: str):
+            with self._mu:
+                self.reads += 1
+            return super().read_text(key)
+
+    root = Slow(tmp_path)
+    root.write_text(
+        f"logs/dt={day}/c.jsonl",
+        json.dumps(
+            {
+                "event_type": "PolicyDecided",
+                "occurred_at": "2026-11-16T18:00:00.000000Z",
+                "bot": "house",
+                "payload": {"action": "hold", "reason": "mantener", "condiciones": []},
+            }
+        )
+        + "\n",
+    )
+    barrier = threading.Barrier(8)
+    errors = []
+
+    def worker():
+        try:
+            barrier.wait(timeout=5)
+            report = cached_decision_report(root, now, load_policy())
+            if report["decisiones"] != 1:
+                errors.append(report["decisiones"])
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+    assert errors == []
+    assert root.lists == 2
+    assert root.reads == 1
+
+
+def test_a_read_failure_is_not_cached_for_the_full_ttl():
+    clear_decision_cache()
+    now = datetime(2026, 11, 16, 18, tzinfo=timezone.utc)
+
+    class Flaky:
+        def __init__(self):
+            self.lists = 0
+            self.fail = True
+
+        def list_prefix(self, prefix: str, max_results: int | None = None):
+            self.lists += 1
+            if self.fail:
+                raise RuntimeError("gcs")
+            return [], False
+
+        def read_text(self, key: str):
+            return None
+
+    store = Flaky()
+    policy = load_policy()
+    first = cached_decision_report(store, now, policy, now_mono=100)
+    assert first["lectura"] == "no_disponible"
+    listed = store.lists
+    second = cached_decision_report(store, now, policy, now_mono=100 + ERROR_TTL_S - 1)
+    assert second["lectura"] == "no_disponible"
+    assert store.lists == listed
+    store.fail = False
+    third = cached_decision_report(store, now, policy, now_mono=100 + ERROR_TTL_S + 1)
+    assert third["lectura"] == "ok"
+    assert store.lists > listed
+
+
+def test_midnight_in_mexico_city_does_not_reuse_the_previous_day(tmp_path):
+    clear_decision_cache()
+    root = LocalRoot(tmp_path)
+    # 06:00Z es medianoche en Ciudad de México.
+    root.write_text(
+        "logs/dt=2026-11-17/nuevo.jsonl",
+        json.dumps(
+            {
+                "event_type": "PolicyDecided",
+                "occurred_at": "2026-11-17T06:00:00.000000Z",
+                "bot": "gambler",
+                "payload": {"action": "hold", "reason": "umbral", "condiciones": ["setup"]},
+            }
+        )
+        + "\n",
+    )
+    before = datetime(2026, 11, 17, 5, 59, tzinfo=timezone.utc)
+    after = datetime(2026, 11, 17, 6, 0, tzinfo=timezone.utc)
+    policy = load_policy()
+    yesterday = cached_decision_report(root, before, policy, now_mono=0)
+    assert yesterday["fecha"] == "2026-11-16"
+    assert yesterday["decisiones"] == 0
+    today = cached_decision_report(root, after, policy, now_mono=10)
+    assert today["fecha"] == "2026-11-17"
+    assert today["decisiones"] == 1
+    # El día viejo se purgó: a los 10 s ya no está, aunque su TTL era de 5 min.
+    again = cached_decision_report(root, before, policy, now_mono=10)
+    assert again is not yesterday
+    assert again["fecha"] == "2026-11-16"
+
+
 def test_a_truncated_listing_is_flagged_and_stops():
     class Cap:
         def __init__(self):
@@ -174,6 +297,15 @@ def test_a_truncated_listing_is_flagged_and_stops():
     report = decision_report(store, datetime.now(timezone.utc), load_policy())
     assert report["truncado"] is True
     assert store.limits == [MAX_LOG_OBJECTS]
+
+
+def test_local_cap_keeps_the_newest_names(tmp_path):
+    root = LocalRoot(tmp_path)
+    for name in ("a.jsonl", "m.jsonl", "z.jsonl"):
+        root.write_text(f"logs/dt=2026-11-16/{name}", "")
+    found, cut = root.list_prefix("logs/dt=2026-11-16/", max_results=2)
+    assert cut is True
+    assert found == ["logs/dt=2026-11-16/m.jsonl", "logs/dt=2026-11-16/z.jsonl"]
 
 
 def test_unused_judge_answers_are_not_kept():

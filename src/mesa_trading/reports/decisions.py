@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -17,24 +18,67 @@ CONDITIONS = ("regimen", "setup", "accion", "ejecucion_degradada")
 ENTRY_REASONS = {"umbral", "entrada", "corto_en_spot"}
 MAX_LOG_OBJECTS = 400
 CACHE_TTL_S = 300
-# fecha -> (monotonic, reporte). Un golpe público no vuelve a listar el bucket.
+# Un fallo de lectura no se queda cinco minutos: se reintenta pronto.
+ERROR_TTL_S = 30
+# (store, fecha) -> (monotonic, reporte). Un golpe público no vuelve a listar el bucket.
 _CACHE: dict[tuple, tuple[float, dict]] = {}
+_LOCKS: dict[tuple, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
 
 
 def clear_decision_cache() -> None:
     _CACHE.clear()
+    with _LOCKS_GUARD:
+        _LOCKS.clear()
+
+
+def _lock_for(key: tuple) -> threading.Lock:
+    with _LOCKS_GUARD:
+        lock = _LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _LOCKS[key] = lock
+        return lock
+
+
+def _ttl_for(found: tuple[float, dict] | None) -> float:
+    if found is not None and found[1].get("lectura") == "no_disponible":
+        return ERROR_TTL_S
+    return CACHE_TTL_S
+
+
+def _fresh(found: tuple[float, dict] | None, clock: float) -> bool:
+    return found is not None and clock - found[0] < _ttl_for(found)
+
+
+def _purge_other_days(today: str, keep: tuple) -> None:
+    for key in list(_CACHE):
+        if key == keep or key[1] == today:
+            continue
+        _CACHE.pop(key, None)
+        with _LOCKS_GUARD:
+            _LOCKS.pop(key, None)
 
 
 def cached_decision_report(store: DataRoot, now: datetime, policy: dict, *, now_mono: float | None = None) -> dict:
-    """Repite el JSON en memoria unos minutos. El acierto no lista ni lee objetos."""
+    """Repite el JSON en memoria unos minutos. El acierto no lista ni lee objetos.
+
+    Si el TTL venció, un solo hilo lee; los demás esperan ese resultado.
+    """
     clock = time.monotonic() if now_mono is None else now_mono
-    key = (id(store), _cdmx_day(now))
+    day = _cdmx_day(now)
+    key = (id(store), day)
     found = _CACHE.get(key)
-    if found is not None and clock - found[0] < CACHE_TTL_S:
+    if _fresh(found, clock):
         return found[1]
-    report = decision_report(store, now, policy)
-    _CACHE[key] = (clock, report)
-    return report
+    with _lock_for(key):
+        found = _CACHE.get(key)
+        if _fresh(found, clock):
+            return found[1]
+        report = decision_report(store, now, policy)
+        _CACHE[key] = (clock, report)
+        _purge_other_days(day, key)
+        return report
 
 
 def decision_report(store: DataRoot, now: datetime, policy: dict) -> dict:
@@ -127,12 +171,15 @@ def _events_for_cdmx_day(store: DataRoot, now: datetime) -> tuple[list[dict], bo
     names: list[str] = []
     truncated = False
     remaining = MAX_LOG_OBJECTS
-    # El día de la Ciudad de México cabe en dos fechas UTC. El tope se aplica al listar.
-    for offset in range(2):
+    # El día de la Ciudad de México cabe en dos fechas UTC. Primero la más nueva.
+    stamps = [
+        (start + timedelta(days=offset)).astimezone(ZoneInfo("UTC")).date().isoformat()
+        for offset in range(2)
+    ]
+    for stamp in reversed(stamps):
         if remaining <= 0:
             truncated = True
             break
-        stamp = (start + timedelta(days=offset)).astimezone(ZoneInfo("UTC")).date().isoformat()
         batch, cut = store.list_prefix(f"logs/dt={stamp}/", max_results=remaining)
         logs = [name for name in batch if name.endswith(".jsonl") or name.endswith(".ndjson")]
         names.extend(logs)

@@ -45,7 +45,8 @@ class LocalRoot(DataRoot):
             return [], False
         found = sorted(path.relative_to(self.root).as_posix() for path in base.rglob("*") if path.is_file())
         if max_results is not None and len(found) > max_results:
-            return found[:max_results], True
+            # El orden lexicográfico de los ciclos es el tiempo: el tope se queda con los últimos.
+            return found[-max_results:], True
         return found, False
 
 
