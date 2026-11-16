@@ -229,6 +229,7 @@ def _consider(env, state, bot, market, mode, cycle_id, now, funnel, managing, ra
             "thresholds": proposal.thresholds,
             "reason": proposal.reason,
             "condiciones": list(proposal.condiciones),
+            "observados": dict(proposal.observados),
             "habria_hecho": proposal.action,
         },
         parts=(market, proposal.action),
@@ -676,6 +677,8 @@ def _record_battery(env, state, response, bot, mode, market, cycle_id, now, snap
                 "market": market,
                 "decision_time": snapshot.get("decision_time") or iso(now),
                 "entry": snapshot.get("last_close"),
+                "spread_bps": snapshot.get("spread_bps"),
+                "liquidity_usd": snapshot.get("liquidity_usd"),
                 "questions": [question.id for question in battery if question.calibrable],
             }
         )
@@ -761,7 +764,15 @@ def _resolve_pending(env, state, cycle_id, now) -> None:
                 if as_utc(candle["ts"]) > decided
             ]
             entry = Decimal(str(item["entry"])) if item.get("entry") else None
-            outcome = realized_outcome(qid, future, entry)
+            outcome = realized_outcome(
+                qid,
+                future,
+                entry,
+                spread_bps=item.get("spread_bps"),
+                liquidity_usd=item.get("liquidity_usd"),
+                max_spread_bps=env.config.filters.max_spread_bps,
+                min_liquidity_usd=env.config.filters.min_liquidity_usd,
+            )
             if outcome is None:
                 remaining.append(qid)
                 continue

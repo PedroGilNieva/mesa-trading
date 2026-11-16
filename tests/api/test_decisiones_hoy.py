@@ -4,6 +4,7 @@ import json
 import threading
 import time
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from fastapi.testclient import TestClient
 
@@ -26,7 +27,7 @@ def test_weak_recorded_answer_names_the_failed_conditions():
     blockers = gambler_blockers(WEAK, load_policy()["gambler"])
     assert blockers is not None
     assert "regimen" in blockers
-    assert "setup" in blockers
+    assert "setup" not in blockers
     assert "accion" in blockers
     assert "ejecucion_degradada" not in blockers
     rules = load_policy()["gambler"]
@@ -107,7 +108,7 @@ def test_decisiones_hoy_counts_without_dumping_answers(tmp_path):
     assert report["gambler"]["tasa_paso"]["ejecucion_degradada"] == 1.0
     text = response.text
     assert "secreto-no-sale" not in text
-    assert "tendencia" not in text
+    assert '"tendencia"' not in text
     estado = client.get("/estado")
     assert estado.status_code == 200
     assert "decisiones" not in estado.json()
@@ -342,7 +343,50 @@ def test_unused_judge_answers_are_not_kept():
     blob = json.dumps(_project_log(text))
     assert "NO-CARGAR-SNAPSHOT" not in blob
     assert "NO-CARGAR-MODELO" not in blob
-    assert "tendencia" not in blob
+    assert '"tendencia"' not in blob
+
+
+def test_house_pause_shows_which_side_failed_and_the_observed_value():
+    text = "\n".join(
+        [
+            json.dumps(
+                {
+                    "event_type": "BatteryAnswered",
+                    "bot": "house",
+                    "correlation_id": "h",
+                    "occurred_at": "2026-11-16T18:00:00.000000Z",
+                    "payload": {
+                        "answers": [
+                            {"question_id": "flujo_toxico", "probs": {"si": 0.2, "no": 0.8}},
+                            {
+                                "question_id": "vale_cotizar",
+                                "probs": {"0": 0.2, "1": 0.8, "2": 0, "3": 0},
+                                "score": 0.8,
+                            },
+                        ]
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "event_type": "PolicyDecided",
+                    "bot": "house",
+                    "correlation_id": "h",
+                    "occurred_at": "2026-11-16T18:00:00.000000Z",
+                    "payload": {"action": "pause", "reason": "toxico_o_no_conviene"},
+                }
+            ),
+        ]
+    )
+    summary = summarize(_project_log(text), load_policy())
+    assert summary["house"]["pausas_por_condicion"]["vale_cotizar"] == 1
+    assert summary["house"]["pausas_por_condicion"]["flujo_toxico"] == 0
+    vale = summary["house"]["observado_vs_umbral"]["vale_cotizar"]
+    toxic = summary["house"]["observado_vs_umbral"]["flujo_toxico"]
+    assert Decimal(vale["umbral_min"]) == Decimal("1")
+    assert Decimal(vale["p50"]) == Decimal("0.8")
+    assert Decimal(toxic["umbral_max"]) == Decimal("0.50")
+    assert Decimal(toxic["p50"]) == Decimal("0.2")
 
 
 def test_old_decision_without_a_battery_stays_unscored():

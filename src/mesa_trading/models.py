@@ -135,6 +135,7 @@ class Proposal(BaseModel):
     reason: str = ""
     is_entry: bool = False
     condiciones: list[str] = Field(default_factory=list)
+    observados: dict[str, str] = Field(default_factory=dict)
 
 
 class Veto(BaseModel):

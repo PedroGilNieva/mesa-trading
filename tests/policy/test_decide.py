@@ -31,7 +31,16 @@ def test_policy_paths():
     assert house.action == "quote"
     toxic = dict(answers)
     toxic["flujo_toxico"] = {"probs": {"si": "0.9", "no": "0.1"}}
-    assert decide("house", "BTC-USD", "spot", toxic, capital_usd=Decimal("1000"), mode="shadow").action == "pause"
+    paused = decide("house", "BTC-USD", "spot", toxic, capital_usd=Decimal("1000"), mode="shadow")
+    assert paused.action == "pause"
+    assert paused.reason == "flujo_toxico"
+    assert paused.condiciones == ["flujo_toxico"]
+    assert Decimal(paused.observados["flujo_toxico"]) == Decimal("0.9")
+    cheap = dict(answers)
+    cheap["vale_cotizar"] = {"score": "0.4", "probs": {"0": "0.6", "1": "0.4", "2": "0", "3": "0"}}
+    quiet_quote = decide("house", "BTC-USD", "spot", cheap, capital_usd=Decimal("1000"), mode="shadow")
+    assert quiet_quote.reason == "vale_cotizar"
+    assert quiet_quote.condiciones == ["vale_cotizar"]
     breaking = dict(answers)
     breaking["estado_rango"] = {"probs": {"dentro": "0.1", "borde": "0.1", "rompiendo": "0.7", "otro": "0.1"}}
     assert decide("house", "BTC-USD", "spot", breaking, capital_usd=Decimal("1000"), mode="shadow", managing=True).action == "close"
