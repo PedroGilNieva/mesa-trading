@@ -23,6 +23,9 @@ curvas:
   house.vale_cotizar: {a: "1", b: "0", aprobada: false, fuente: "identidad de staging; no es evidencia de edge"}
   house.hay_volumen: {a: "1", b: "0", aprobada: false, fuente: "identidad de staging; no es evidencia de edge"}
 gambler:
+  # No se movieron el 16 nov por la tarde. Sin lectura de
+  # gs://mesa-trading-staging-data/logs/ no hay tasa por condición
+  # para proponer otro corte. GET /decisiones/hoy publica esas tasas.
   # 0.55 y 0.62 salen de las cubetas del 16 nov: la masa de `accion` está
   # en 0.4-0.6 (n=3189 de 6173) y solo ~21% llega a 0.6-0.7. setup_min 1.5
   # pide un parecido medio; 2 casi no ocurría (la cubeta 0.6+ de setup tiene n=56).

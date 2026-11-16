@@ -6,7 +6,8 @@ solo trae velas hasta ahora. Entonces la orden de mercado cruza el libro leído
 después del reloj de la decisión: compra al ask, vende al bid. El medio spread
 ya está en ese precio; encima se suman impacto, bps extra y comisión. No se
 deja pendiente al siguiente tick: cinco minutos después el precio ya no es el
-que se cruzó.
+que se cruzó. Una límite sin vela que la cruce tampoco se llena contra el
+libro: el ciclo la guarda y el tick siguiente la resuelve o la cancela.
 
 No tiene red y no importa ningún cliente HTTP.
 """

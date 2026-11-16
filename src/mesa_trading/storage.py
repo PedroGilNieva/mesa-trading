@@ -16,6 +16,9 @@ class DataRoot:
     def write_text(self, key: str, text: str) -> None:
         raise NotImplementedError
 
+    def list_prefix(self, prefix: str) -> list[str]:
+        return []
+
 
 class LocalRoot(DataRoot):
     def __init__(self, root: Path) -> None:
@@ -32,6 +35,14 @@ class LocalRoot(DataRoot):
         path = self.root / key
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
+
+    def list_prefix(self, prefix: str) -> list[str]:
+        base = self.root / prefix
+        if base.is_file():
+            return [prefix]
+        if not base.exists():
+            return []
+        return sorted(path.relative_to(self.root).as_posix() for path in base.rglob("*") if path.is_file())
 
 
 class GcsRoot(DataRoot):
@@ -53,6 +64,11 @@ class GcsRoot(DataRoot):
         status, _body = _request("POST", url, self.token_provider(), text.encode("utf-8"), "application/json")
         if status not in (200, 201):
             raise RuntimeError(f"no se pudo escribir {key}")
+
+    def list_prefix(self, prefix: str) -> list[str]:
+        from mesa_trading.gcs import _list
+
+        return _list(self.bucket, prefix, self.token_provider())
 
 
 def data_root_from_env() -> DataRoot:

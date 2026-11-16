@@ -52,6 +52,28 @@ class Fill(BaseModel):
     reason: str = ""
 
 
+class RestingOrder(BaseModel):
+    """Límite que no cruzó en el tick en que se mandó. El siguiente tick la resuelve."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    client_order_id: str
+    cycle_id: str
+    bot: str
+    market: str
+    side: Literal["buy", "sell"]
+    action: str
+    qty: Decimal
+    notional_usd: Decimal
+    limit_price: Decimal
+    decision_time: datetime
+    expires_at: datetime
+    reason: str = ""
+    kind: Literal["spot", "perp"] = "spot"
+    threshold_version: int = 0
+    cuenta_como_evidencia: bool = False
+
+
 class Position(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -81,6 +103,7 @@ class BookState(BaseModel):
     slippage_usd: Decimal = Decimal("0")
     peak_equity_usd: Decimal
     position: Position | None = None
+    resting_order: RestingOrder | None = None
     halted_until: datetime | None = None
     halt_rule: str | None = None
     last_prices: dict[str, str] = Field(default_factory=dict)
@@ -111,6 +134,7 @@ class Proposal(BaseModel):
     thresholds: dict[str, Any] = Field(default_factory=dict)
     reason: str = ""
     is_entry: bool = False
+    condiciones: list[str] = Field(default_factory=list)
 
 
 class Veto(BaseModel):
