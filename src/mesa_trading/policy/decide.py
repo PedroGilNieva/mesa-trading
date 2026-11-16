@@ -17,15 +17,34 @@ def load_policy(path: Path | None = None) -> dict[str, Any]:
     return yaml.safe_load(target.read_text(encoding="utf-8"))
 
 
-def curves_from_policy(policy: dict[str, Any] | None) -> dict[str, dict[str, str]]:
+def curves_from_policy(policy: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     """Curvas declaradas en la política. Vacío = el simulado no opera."""
     raw = (policy or {}).get("curvas") or {}
     out = {}
     for key, body in raw.items():
         if not isinstance(body, dict) or "a" not in body or "b" not in body:
             continue
-        out[str(key)] = {"a": str(body["a"]), "b": str(body["b"])}
+        item: dict[str, Any] = {"a": str(body["a"]), "b": str(body["b"])}
+        if "aprobada" in body:
+            item["aprobada"] = bool(body["aprobada"])
+        if str(body.get("fuente") or "").strip():
+            item["fuente"] = str(body["fuente"]).strip()
+        out[str(key)] = item
     return out
+
+
+def _identity_curve(curve: dict) -> bool:
+    return Decimal(str(curve.get("a"))) == Decimal("1") and Decimal(str(curve.get("b"))) == Decimal("0")
+
+
+def _curve_allowed(curve: dict | None, mode: str) -> bool:
+    """La identidad solo vale en simulado. Otro modo exige aprobada y fuente, y no puede ser identidad."""
+    if not curve or "a" not in curve or "b" not in curve:
+        return False
+    identity = _identity_curve(curve)
+    if identity:
+        return mode == "simulated"
+    return curve.get("aprobada") is True and bool(str(curve.get("fuente") or "").strip())
 
 
 def platt(probability: Decimal, a: Decimal, b: Decimal) -> Decimal:
@@ -38,19 +57,22 @@ def platt(probability: Decimal, a: Decimal, b: Decimal) -> Decimal:
 def apply_calibration(
     probs: dict[str, Decimal],
     *,
-    curve: dict[str, str] | None,
+    curve: dict | None,
     mode: str,
 ) -> dict[str, Decimal] | None:
-    """Sin curva aprobada, la probabilidad cruda solo se usa en sombra."""
-    if curve:
-        a = Decimal(curve["a"])
-        b = Decimal(curve["b"])
-        adjusted = {key: platt(value, a, b) for key, value in probs.items()}
-        total = sum(adjusted.values())
-        return {key: value / total for key, value in adjusted.items()}
+    """La sombra usa la probabilidad cruda. La identidad solo se aplica en simulado."""
     if mode == "shadow":
         return dict(probs)
-    return None
+    if not _curve_allowed(curve, mode):
+        return None
+    assert curve is not None
+    a = Decimal(str(curve["a"]))
+    b = Decimal(str(curve["b"]))
+    adjusted = {key: platt(value, a, b) for key, value in probs.items()}
+    total = sum(adjusted.values())
+    if total <= 0:
+        return None
+    return {key: value / total for key, value in adjusted.items()}
 
 
 def decide(

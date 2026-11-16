@@ -47,6 +47,8 @@ def evaluate(proposal: Proposal, book: BookState, facts: RiskFacts, config: Desk
         return Veto(rule="perdida_diaria", detail="pérdida del día alcanzó el límite", halt=True)
 
     if proposal.action in {"long", "short", "quote"} and proposal.is_entry:
+        if proposal.notional_usd <= 0:
+            return Veto(rule="notional_no_positivo", detail="el nocional tiene que ser mayor que cero")
         if config.risk.single_position and book.position is not None:
             return Veto(rule="exposicion_total", detail="ya hay una posición en la mesa")
         cap = facts.equity_usd * config.risk.max_position_pct

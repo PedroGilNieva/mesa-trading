@@ -9,7 +9,7 @@ from decimal import Decimal
 
 from mesa_trading.constants import PINNED_MODEL
 from mesa_trading.loop.cycle import run_cycle
-from mesa_trading.policy.decide import curves_from_policy, decide, load_policy
+from mesa_trading.policy.decide import apply_calibration, curves_from_policy, decide, load_policy
 from tests.helpers import T0, connector_for, make_env
 
 
@@ -55,6 +55,62 @@ class QueueJudge:
         item = self._items[self.calls]
         self.calls += 1
         return item
+
+
+def test_identity_curve_only_applies_in_simulated():
+    probs = {"si": Decimal("0.6"), "no": Decimal("0.4")}
+    identity = {"a": "1", "b": "0", "aprobada": True, "fuente": "no autoriza dinero real"}
+    assert apply_calibration(probs, curve=identity, mode="real") is None
+    assert apply_calibration(probs, curve=identity, mode="live") is None
+    shadowed = apply_calibration(probs, curve={"a": "2", "b": "0", "aprobada": True, "fuente": "x"}, mode="shadow")
+    assert shadowed is not None
+    assert shadowed["si"] == Decimal("0.6")
+    assert apply_calibration(probs, curve={"a": "1", "b": "0"}, mode="simulated") is not None
+    assert apply_calibration(probs, curve={"a": "1.2", "b": "-0.1"}, mode="simulated") is None
+    approved = {"a": "1.2", "b": "-0.1", "aprobada": True, "fuente": "informe interno"}
+    assert apply_calibration(probs, curve=approved, mode="simulated") is not None
+
+
+def test_house_quotes_a_limit_at_a_quarter_of_capital(tmp_path):
+    """House sigue pudiendo cotizar. Es una límite al 25%; sin vela que cruce, no llena."""
+    answers = {
+        "estado_rango": {"probs": {"dentro": "0.8", "borde": "0.1", "rompiendo": "0.05", "otro": "0.05"}},
+        "flujo_toxico": {"probs": {"si": "0.1", "no": "0.9"}},
+        "vale_cotizar": {"probs": {"0": "0", "1": "0", "2": "0.6", "3": "0.4"}},
+        "hay_volumen": {"probs": {"si": "0.9", "no": "0.1"}},
+    }
+    policy = load_policy()
+    quote = decide(
+        "house",
+        "WETH-USDC",
+        "spot",
+        answers,
+        capital_usd=Decimal("1000"),
+        mode="simulated",
+        policy=policy,
+        curves=curves_from_policy(policy),
+    )
+    assert quote.action == "quote"
+    assert quote.is_entry is True
+    assert quote.notional_usd == Decimal("250.00")
+    connector = connector_for(T0, price="1000")
+    connector._candles["WETH-USDC"] = list(connector._candles["BTC-PERP"])
+    connector._books["WETH-USDC"] = dict(connector._books["BTC-PERP"])
+    env = make_env(tmp_path, QueueJudge([answers]), connector, mode="simulated", markets=["BTC-PERP"])
+    env.config.bots["gambler"].enabled = False
+    env.config.bots["house"].enabled = True
+    env.config.bots["house"].mode = "simulated"
+    env.config.bots["house"].markets = ["WETH-USDC"]
+    env.policy = policy
+    env.curves = curves_from_policy(policy)
+    run_cycle(env, "house-1", T0)
+    submitted = [event for event in env.logs.all_events() if event["event_type"] == "OrderSubmitted"]
+    assert len(submitted) == 1
+    payload = submitted[0]["payload"]
+    assert payload["action"] == "quote"
+    assert payload["order_type"] == "limit"
+    assert payload["notional_usd"] == "250.00"
+    assert not any(event["event_type"] == "PositionOpened" for event in env.logs.all_events())
 
 
 def test_simulated_without_a_curve_holds():
@@ -121,7 +177,7 @@ def test_a_day_of_recorded_answers_opens_five_to_ten_round_trips(tmp_path):
     opened = [event for event in env.logs.all_events() if event["event_type"] == "PositionOpened"]
     closed = [event for event in env.logs.all_events() if event["event_type"] == "PositionClosed"]
     vetoes = [event for event in env.logs.all_events() if event["event_type"] == "RiskVetoed"]
-    assert 5 <= len(opened) <= 10
+    assert len(opened) == 8
     assert len(closed) == len(opened)
     assert vetoes == []
     assert all(event["payload"]["price_source"] == "libro" for event in env.logs.all_events() if event["event_type"] == "OrderFilled")

@@ -171,9 +171,7 @@ def build_calibration(
                 max_dev = max((bucket["desvio_pp"] for bucket in counted), default=None)
                 if max_dev is not None:
                     deviations.append(max_dev)
-                # base 0: el resultado no varía (p.ej. ejecucion_degradada siempre "no").
-                # No entra al mínimo: un skill indefinido no es evidencia.
-                if sk is not None and base not in (None, 0):
+                if sk is not None:
                     skills.append(sk)
                 min_resolved = min(min_resolved, len(pairs))
             bot_questions[qid] = {
@@ -273,6 +271,9 @@ def build_daily(events: list[dict], config: DeskConfig, now: datetime, book: dic
         alerts.append("ciclos_perdidos")
     if judge_status.get("no_key"):
         alerts.append("juez_sin_llave")
+    entradas = sum(decision_actions.get(action, 0) for action in ("long", "short", "quote"))
+    if sum(decisions.values()) > 0 and entradas == 0:
+        alerts.append("sin_entradas")
     price = config.judge.price_usd_per_million_input_tokens
     spend = float(Decimal(tokens) * price / Decimal(1_000_000))
     costo = _cost_ceiling(config)
@@ -675,15 +676,8 @@ def apply_verdict(
         f"{ritmo} "
         "GO tentativo exige la muestra, PnL > 0 y skill ≥ "
         f"{promo.min_brier_skill}. NO-GO si, ya con la muestra, el PnL no es positivo o el skill es ≤ 0, "
-        "o antes si el drawdown pasa el corte. GO tentativo no autoriza dinero real ni un broker real."
-        + (
-            " Skill negativo: el modelo queda peor que predecir la frecuencia. "
-            "En el reporte del 16 nov el mínimo era setup (−1.41): la clase más probable "
-            "solo coincidía con el cubo de rendimiento futuro cerca del 12% de las veces, "
-            "cuando el modelo le daba ~54%."
-            if min_skill is not None and min_skill < 0
-            else ""
-        )
+        "o antes si el drawdown pasa el corte. GO tentativo no autoriza dinero real ni un broker real. "
+        "Un periodo operado con curva identidad no cuenta como evidencia de edge."
     )
     daily["veredicto"] = {
         "estado": estado,

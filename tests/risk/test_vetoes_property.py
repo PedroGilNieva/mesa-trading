@@ -46,6 +46,13 @@ def _proposal(**kwargs) -> Proposal:
     return Proposal(**base)
 
 
+def test_entry_with_zero_notional_is_vetoed():
+    config = load_desk(repo_root() / "config" / "desk.yaml")
+    veto = evaluate(_proposal(notional_usd=Decimal("0")), fresh_book(Decimal("1000"), T0), _facts(), config)
+    assert veto is not None
+    assert veto.rule == "notional_no_positivo"
+
+
 def test_a16_daily_loss_halts_until_next_utc_day(tmp_path):
     judge = ScriptedJudge(bullish())
     env = make_env(tmp_path, judge, connector_for(T0), mode="simulated", markets=["BTC-PERP"])
