@@ -119,7 +119,7 @@ def test_installed_package_serves_health(tmp_path):
                 "assert all(path.is_file() and 'bundled_config' in path.parts for path in paths), paths\n"
                 "assert load_desk(paths[0]).cadence_minutes == 5\n"
                 "assert 'dex_minimo' in load_fees()\n"
-                "assert load_policy()['version'] == 1\n"
+                "assert load_policy()['version'] == 2\n"
             ),
         ],
         cwd=work,

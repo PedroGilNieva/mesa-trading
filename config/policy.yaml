@@ -2,18 +2,22 @@
 # Staging, a partir del reporte 2026-11-16: sin curva, el modo simulado
 # hacía hold en las 1728 decisiones (sin_calibracion_aprobada) y no abría
 # posiciones. Las curvas de abajo son identidad (no cambian la probabilidad).
-# No son una calibración aprobada y no autorizan dinero real.
-version: 1
+# La identidad solo se aplica en modo simulado. No está aprobada: este periodo
+# no cuenta como evidencia de edge y ningún modo con dinero real puede usarla.
+# House sí puede cotizar (orden límite al 25% del capital). El SimBroker no la
+# llena si no hay una vela posterior que cruce el límite; hasta ver esos fills,
+# las cotizaciones no son evidencia.
+version: 2
 curvas:
-  gambler.regimen: {a: "1", b: "0"}
-  gambler.setup: {a: "1", b: "0"}
-  gambler.accion: {a: "1", b: "0"}
-  gambler.ejecucion_degradada: {a: "1", b: "0"}
-  gambler.presion_compra: {a: "1", b: "0"}
-  house.estado_rango: {a: "1", b: "0"}
-  house.flujo_toxico: {a: "1", b: "0"}
-  house.vale_cotizar: {a: "1", b: "0"}
-  house.hay_volumen: {a: "1", b: "0"}
+  gambler.regimen: {a: "1", b: "0", aprobada: false, fuente: "identidad de staging; no es evidencia de edge"}
+  gambler.setup: {a: "1", b: "0", aprobada: false, fuente: "identidad de staging; no es evidencia de edge"}
+  gambler.accion: {a: "1", b: "0", aprobada: false, fuente: "identidad de staging; no es evidencia de edge"}
+  gambler.ejecucion_degradada: {a: "1", b: "0", aprobada: false, fuente: "identidad de staging; no es evidencia de edge"}
+  gambler.presion_compra: {a: "1", b: "0", aprobada: false, fuente: "identidad de staging; no es evidencia de edge"}
+  house.estado_rango: {a: "1", b: "0", aprobada: false, fuente: "identidad de staging; no es evidencia de edge"}
+  house.flujo_toxico: {a: "1", b: "0", aprobada: false, fuente: "identidad de staging; no es evidencia de edge"}
+  house.vale_cotizar: {a: "1", b: "0", aprobada: false, fuente: "identidad de staging; no es evidencia de edge"}
+  house.hay_volumen: {a: "1", b: "0", aprobada: false, fuente: "identidad de staging; no es evidencia de edge"}
 gambler:
   # 0.55 y 0.62 salen de las cubetas del 16 nov: la masa de `accion` está
   # en 0.4-0.6 (n=3189 de 6173) y solo ~21% llega a 0.6-0.7. setup_min 1.5

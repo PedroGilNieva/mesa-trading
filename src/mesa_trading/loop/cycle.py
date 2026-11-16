@@ -805,6 +805,7 @@ def json_order(order: Order) -> dict:
         "market": order.market,
         "side": order.side,
         "action": order.action,
+        "order_type": order.order_type,
         "notional_usd": str(order.notional_usd),
         "reason": order.reason,
     }
