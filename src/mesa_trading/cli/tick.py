@@ -15,7 +15,7 @@ from mesa_trading.connectors.fixture import FixtureConnector
 from mesa_trading.connectors.live import GeckoTerminalConnector, HyperliquidInfoConnector
 from mesa_trading.http_allow import HttpClient
 from mesa_trading.loop.cycle import DeskEnv, run_cycle
-from mesa_trading.policy.decide import load_policy
+from mesa_trading.policy.decide import curves_from_policy, load_policy
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -64,14 +64,16 @@ def main(argv: list[str] | None = None) -> int:
         judge = RemoteJudge(judge_url)
     else:
         judge = LocalHoldJudge()
+    policy = load_policy()
     env = DeskEnv(
         config=config,
         logs=open_logs(str(data)),
         book=open_book(str(data), config.capital_usd, now),
         connector_for=connector_for,
         judge=judge,
-        policy=load_policy(),
+        policy=policy,
         fees=load_fees(),
+        curves=curves_from_policy(policy),
     )
     run_cycle(env, cycle_id, now)
     return 0

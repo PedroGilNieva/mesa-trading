@@ -1,9 +1,26 @@
 # Umbrales de la política. La confianza del modelo no cambia el tamaño.
+# Staging, a partir del reporte 2026-11-16: sin curva, el modo simulado
+# hacía hold en las 1728 decisiones (sin_calibracion_aprobada) y no abría
+# posiciones. Las curvas de abajo son identidad (no cambian la probabilidad).
+# No son una calibración aprobada y no autorizan dinero real.
 version: 1
+curvas:
+  gambler.regimen: {a: "1", b: "0"}
+  gambler.setup: {a: "1", b: "0"}
+  gambler.accion: {a: "1", b: "0"}
+  gambler.ejecucion_degradada: {a: "1", b: "0"}
+  gambler.presion_compra: {a: "1", b: "0"}
+  house.estado_rango: {a: "1", b: "0"}
+  house.flujo_toxico: {a: "1", b: "0"}
+  house.vale_cotizar: {a: "1", b: "0"}
+  house.hay_volumen: {a: "1", b: "0"}
 gambler:
-  regimen_tendencia_min_p: 0.60
-  setup_min: 2
-  accion_min_p: 0.60
+  # 0.55 y 0.62 salen de las cubetas del 16 nov: la masa de `accion` está
+  # en 0.4-0.6 (n=3189 de 6173) y solo ~21% llega a 0.6-0.7. setup_min 1.5
+  # pide un parecido medio; 2 casi no ocurría (la cubeta 0.6+ de setup tiene n=56).
+  regimen_tendencia_min_p: 0.55
+  setup_min: 1.5
+  accion_min_p: 0.62
   ejecucion_degradada_max_p: 0.40
   position_size_pct: 0.25
   expected_edge_bps: 40

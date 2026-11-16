@@ -41,3 +41,4 @@ def test_a19_rejection_records_step_and_silent_filter_alerts(tmp_path):
     report = build_daily(events, load_desk(repo_root() / "config" / "desk.yaml"), datetime(2026, 11, 6, 19, tzinfo=timezone.utc))
     assert "filtro_mudo:hechos_duros" in report["alertas"]
     assert silent_step_alerts({"hechos_duros": 50}, {}) == ["filtro_mudo:hechos_duros"]
+    assert silent_step_alerts({"bateria": 1728, "politica": 1728}, {}) == []

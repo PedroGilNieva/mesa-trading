@@ -91,9 +91,16 @@ def still_banked(until: str | None, now: datetime) -> bool:
     return as_utc(datetime.fromisoformat(until.replace("Z", "+00:00"))) > as_utc(now)
 
 
+# Pasos que pueden rechazar. `bateria` y `politica` solo cuentan quién llegó:
+# un hold no es un rechazo, y marcarlos filtro_mudo era una falsa alarma.
+REJECTION_STEPS = frozenset({"hechos_duros", "calculos_baratos", "riesgo"})
+
+
 def silent_step_alerts(reached: dict[str, int], rejected: dict[str, int]) -> list[str]:
     alerts = []
     for step, count in reached.items():
+        if step not in REJECTION_STEPS:
+            continue
         if count >= 50 and rejected.get(step, 0) == 0:
             alerts.append(f"filtro_mudo:{step}")
     return alerts

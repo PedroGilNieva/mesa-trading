@@ -171,7 +171,9 @@ def build_calibration(
                 max_dev = max((bucket["desvio_pp"] for bucket in counted), default=None)
                 if max_dev is not None:
                     deviations.append(max_dev)
-                if sk is not None:
+                # base 0: el resultado no varía (p.ej. ejecucion_degradada siempre "no").
+                # No entra al mínimo: un skill indefinido no es evidencia.
+                if sk is not None and base not in (None, 0):
                     skills.append(sk)
                 min_resolved = min(min_resolved, len(pairs))
             bot_questions[qid] = {
@@ -211,6 +213,8 @@ def build_daily(events: list[dict], config: DeskConfig, now: datetime, book: dic
     start, end = _window(now)
     window = [event for event in events if start <= _when(event) <= end]
     decisions: dict[str, int] = defaultdict(int)
+    decision_actions: dict[str, int] = defaultdict(int)
+    decision_reasons: dict[str, int] = defaultdict(int)
     vetoes: dict[str, int] = defaultdict(int)
     rejected: dict[str, int] = defaultdict(int)
     motivos: dict[str, int] = defaultdict(int)
@@ -228,6 +232,8 @@ def build_daily(events: list[dict], config: DeskConfig, now: datetime, book: dic
         payload = event.get("payload") or {}
         if kind == "PolicyDecided":
             decisions[event.get("bot") or "?"] += 1
+            decision_actions[str(payload.get("action") or "?")] += 1
+            decision_reasons[str(payload.get("reason") or "?")] += 1
         elif kind == "RiskVetoed":
             vetoes[payload.get("regla") or "?"] += 1
         elif kind == "CandidateRejected":
@@ -289,6 +295,8 @@ def build_daily(events: list[dict], config: DeskConfig, now: datetime, book: dic
         "periodo": {"inicio": iso(start), "fin": iso(end)},
         "ciclos": {"corridos": finished, "esperados": expected, "perdidos": missed},
         "decisiones_por_bot": dict(decisions),
+        "decisiones_por_accion": dict(decision_actions),
+        "decisiones_por_razon": dict(decision_reasons),
         "operaciones_simuladas": fills,
         "pnl_dia_usd": pnl_day,
         "pnl_acumulado_usd": (book or {}).get("realized_pnl_usd", pnl_day),
@@ -658,6 +666,14 @@ def apply_verdict(
         "GO tentativo exige la muestra, PnL > 0 y skill ≥ "
         f"{promo.min_brier_skill}. NO-GO si, ya con la muestra, el PnL no es positivo o el skill es ≤ 0, "
         "o antes si el drawdown pasa el corte. GO tentativo no autoriza dinero real ni un broker real."
+        + (
+            " Skill negativo: el modelo queda peor que predecir la frecuencia. "
+            "En el reporte del 16 nov el mínimo era setup (−1.41): la clase más probable "
+            "solo coincidía con el cubo de rendimiento futuro cerca del 12% de las veces, "
+            "cuando el modelo le daba ~54%."
+            if min_skill is not None and min_skill < 0
+            else ""
+        )
     )
     daily["veredicto"] = {
         "estado": estado,
