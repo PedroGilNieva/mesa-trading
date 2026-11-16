@@ -70,7 +70,8 @@ class GcsLogSink(LogSink):
         token = self.token_provider()
         names: list[str] = []
         for day in _days_between(start, end):
-            for name in _list(self.bucket, f"logs/dt={day}/", token):
+            found, _truncated = _list(self.bucket, f"logs/dt={day}/", token)
+            for name in found:
                 if _is_log_object(name):
                     names.append(name)
         rows: list[dict] = []
@@ -295,29 +296,53 @@ def _delete(bucket: str, key: str, token: str, generation: int) -> None:
         return
 
 
-def _list(bucket: str, prefix: str, token: str) -> list[str]:
+def _list(
+    bucket: str,
+    prefix: str,
+    token: str,
+    max_results: int | None = None,
+    fetch=None,
+) -> tuple[list[str], bool]:
+    """Lista un prefijo. Con max_results se detiene en esa página, sin pedir el resto."""
     import sys
     import urllib.parse
     import urllib.request
 
+    def default_fetch(url: str) -> dict:
+        req = urllib.request.Request(url, headers=_headers(token))
+        with urllib.request.urlopen(req, timeout=15) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    fetch = fetch or default_fetch
     names: list[str] = []
     page = ""
     seen_tokens: set[str] = set()
     warned = False
+    truncated = False
     while True:
+        room = None if max_results is None else max_results - len(names)
+        if room is not None and room <= 0:
+            truncated = True
+            break
+        page_size = 1000 if room is None else min(1000, room)
         query = urllib.parse.urlencode(
-            {"prefix": prefix, "maxResults": "1000", **({"pageToken": page} if page else {})}
+            {"prefix": prefix, "maxResults": str(page_size), **({"pageToken": page} if page else {})}
         )
         url = f"https://storage.googleapis.com/storage/v1/b/{bucket}/o?{query}"
-        req = urllib.request.Request(url, headers=_headers(token))
-        with urllib.request.urlopen(req, timeout=15) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-        names.extend(item["name"] for item in payload.get("items") or [])
+        payload = fetch(url)
+        items = payload.get("items") or []
+        names.extend(item["name"] for item in items)
         page = str(payload.get("nextPageToken") or "")
+        if max_results is not None and len(names) >= max_results:
+            overflow = len(names) - max_results
+            names = names[:max_results]
+            truncated = bool(page) or overflow > 0
+            break
         if not page:
             break
         if page in seen_tokens:
             print(f"aviso: token de página repetido al listar {prefix}", file=sys.stderr)
+            truncated = True
             break
         seen_tokens.add(page)
         if len(names) >= 5000 and not warned:
@@ -326,7 +351,7 @@ def _list(bucket: str, prefix: str, token: str) -> list[str]:
                 f"aviso: el listado de {prefix} ya pasa de 5000 objetos; se sigue paginando",
                 file=sys.stderr,
             )
-    return names
+    return names, truncated
 
 
 def _download_many(bucket: str, names: list[str], token: str) -> list[bytes | None]:

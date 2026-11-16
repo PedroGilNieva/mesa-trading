@@ -99,6 +99,7 @@ def test_house_quote_expires_when_the_next_candle_does_not_cross(tmp_path):
             "volume": Decimal("30"),
         }
     )
+    env.config.bots["house"].enabled = False
     run_cycle(env, "q2", ts)
     cancelled = [
         event
@@ -109,6 +110,7 @@ def test_house_quote_expires_when_the_next_candle_does_not_cross(tmp_path):
     assert not _events(env, "PositionOpened")
     state, _gen = env.book.read()
     assert state.position is None
+    assert state.resting_order is None
 
 
 def test_a_resting_quote_is_cancelled_when_a_position_is_already_open(tmp_path):

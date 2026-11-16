@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -15,6 +16,25 @@ CONDITIONS = ("regimen", "setup", "accion", "ejecucion_degradada")
 # Razones en las que el gambler ya tuvo las cuatro respuestas y se puede medir el corte.
 ENTRY_REASONS = {"umbral", "entrada", "corto_en_spot"}
 MAX_LOG_OBJECTS = 400
+CACHE_TTL_S = 300
+# fecha -> (monotonic, reporte). Un golpe público no vuelve a listar el bucket.
+_CACHE: dict[tuple, tuple[float, dict]] = {}
+
+
+def clear_decision_cache() -> None:
+    _CACHE.clear()
+
+
+def cached_decision_report(store: DataRoot, now: datetime, policy: dict, *, now_mono: float | None = None) -> dict:
+    """Repite el JSON en memoria unos minutos. El acierto no lista ni lee objetos."""
+    clock = time.monotonic() if now_mono is None else now_mono
+    key = (id(store), _cdmx_day(now))
+    found = _CACHE.get(key)
+    if found is not None and clock - found[0] < CACHE_TTL_S:
+        return found[1]
+    report = decision_report(store, now, policy)
+    _CACHE[key] = (clock, report)
+    return report
 
 
 def decision_report(store: DataRoot, now: datetime, policy: dict) -> dict:
@@ -105,32 +125,81 @@ def _events_for_cdmx_day(store: DataRoot, now: datetime) -> tuple[list[dict], bo
     start = as_utc(now).astimezone(CDMX).replace(hour=0, minute=0, second=0, microsecond=0)
     end = start + timedelta(days=1)
     names: list[str] = []
-    # El día de la Ciudad de México cabe en dos fechas UTC.
+    truncated = False
+    remaining = MAX_LOG_OBJECTS
+    # El día de la Ciudad de México cabe en dos fechas UTC. El tope se aplica al listar.
     for offset in range(2):
+        if remaining <= 0:
+            truncated = True
+            break
         stamp = (start + timedelta(days=offset)).astimezone(ZoneInfo("UTC")).date().isoformat()
-        names.extend(store.list_prefix(f"logs/dt={stamp}/"))
-    names = [name for name in names if name.endswith(".jsonl") or name.endswith(".ndjson")]
-    truncated = len(names) > MAX_LOG_OBJECTS
-    chosen = sorted(names)[-MAX_LOG_OBJECTS:]
+        batch, cut = store.list_prefix(f"logs/dt={stamp}/", max_results=remaining)
+        logs = [name for name in batch if name.endswith(".jsonl") or name.endswith(".ndjson")]
+        names.extend(logs)
+        remaining -= len(batch)
+        if cut:
+            truncated = True
+            break
     rows: list[dict] = []
-    for name in chosen:
+    for name in names[:MAX_LOG_OBJECTS]:
         text = store.read_text(name)
         if not text:
             continue
-        for line in text.splitlines():
-            if not line.strip():
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if event.get("event_type") not in {"PolicyDecided", "BatteryAnswered"}:
-                continue
+        for event in _project_log(text):
             when = _when(event)
             if when is None or when < start or when >= end:
                 continue
             rows.append(event)
     return rows, truncated
+
+
+def _project_log(text: str) -> list[dict]:
+    """Se queda con los campos del conteo. Las respuestas solo si hacen falta para un hold viejo."""
+    needed: set[str] = set()
+    for event in _parse_lines(text):
+        if event.get("event_type") != "PolicyDecided" or event.get("bot") != "gambler":
+            continue
+        payload = event.get("payload") or {}
+        if str(payload.get("reason") or "") in ENTRY_REASONS and "condiciones" not in payload:
+            needed.add(str(event.get("correlation_id") or ""))
+    slim = []
+    for event in _parse_lines(text):
+        kind = event.get("event_type")
+        if kind not in {"PolicyDecided", "BatteryAnswered"}:
+            continue
+        payload = event.get("payload") or {}
+        item = {
+            "event_type": kind,
+            "bot": event.get("bot"),
+            "correlation_id": event.get("correlation_id"),
+            "occurred_at": event.get("occurred_at"),
+            "payload": {},
+        }
+        if kind == "PolicyDecided":
+            kept = {"action": payload.get("action"), "reason": payload.get("reason")}
+            if "condiciones" in payload:
+                kept["condiciones"] = [str(value) for value in (payload.get("condiciones") or [])]
+            item["payload"] = kept
+        elif str(event.get("correlation_id") or "") in needed and event.get("bot") == "gambler":
+            answers = []
+            for answer in payload.get("answers") or []:
+                qid = str(answer.get("question_id") or "")
+                if qid not in CONDITIONS:
+                    continue
+                answers.append({"question_id": qid, "probs": answer.get("probs"), "score": answer.get("score")})
+            item["payload"] = {"answers": answers}
+        slim.append(item)
+    return slim
+
+
+def _parse_lines(text: str):
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            yield json.loads(line)
+        except json.JSONDecodeError:
+            continue
 
 
 def _cdmx_day(now: datetime) -> str:

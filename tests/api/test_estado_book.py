@@ -20,6 +20,7 @@ def test_estado_reads_the_book_and_does_not_list_logs(tmp_path):
                     "last_cycle_id": "20261112T171500Z",
                     "last_cycle_at": "2026-11-12T17:15:00.000000Z",
                     "closed_trades": 3,
+                    "resting_order": {"client_order_id": "q1", "market": "WETH-USDC"},
                 }
             }
         ),
@@ -43,3 +44,5 @@ def test_estado_reads_the_book_and_does_not_list_logs(tmp_path):
     assert body["operaciones_cerradas"] == 3
     assert body["broker"] == "simulado"
     assert body["posicion_abierta"] is None
+    assert body["resting_order"]["client_order_id"] == "q1"
+    assert body["resting_order"]["market"] == "WETH-USDC"

@@ -7,7 +7,15 @@ from fastapi.testclient import TestClient
 
 from mesa_trading.api.app import create_app
 from mesa_trading.policy.decide import gambler_blockers, load_policy
-from mesa_trading.reports.decisions import summarize
+from mesa_trading.reports.decisions import (
+    CACHE_TTL_S,
+    MAX_LOG_OBJECTS,
+    _project_log,
+    cached_decision_report,
+    clear_decision_cache,
+    decision_report,
+    summarize,
+)
 from mesa_trading.storage import LocalRoot
 from tests.policy.test_simulated_entries import WEAK
 
@@ -101,6 +109,108 @@ def test_decisiones_hoy_counts_without_dumping_answers(tmp_path):
     estado = client.get("/estado")
     assert estado.status_code == 200
     assert "decisiones" not in estado.json()
+
+
+def test_cached_report_does_not_touch_storage_again(tmp_path):
+    clear_decision_cache()
+    now = datetime.now(timezone.utc)
+    stamp = now.strftime("%Y-%m-%dT%H:%M:%S.000000Z")
+    day = now.strftime("%Y-%m-%d")
+
+    class Counting(LocalRoot):
+        def __init__(self, root):
+            super().__init__(root)
+            self.lists = 0
+            self.reads = 0
+
+        def list_prefix(self, prefix: str, max_results: int | None = None):
+            self.lists += 1
+            return super().list_prefix(prefix, max_results=max_results)
+
+        def read_text(self, key: str):
+            self.reads += 1
+            return super().read_text(key)
+
+    root = Counting(tmp_path)
+    root.write_text(
+        f"logs/dt={day}/c.jsonl",
+        json.dumps(
+            {
+                "event_type": "PolicyDecided",
+                "occurred_at": stamp,
+                "bot": "house",
+                "payload": {"action": "hold", "reason": "mantener", "condiciones": []},
+            }
+        )
+        + "\n",
+    )
+    client = TestClient(create_app(root))
+    first = client.get("/decisiones/hoy")
+    assert first.status_code == 200
+    assert first.json()["decisiones"] == 1
+    listed, read = root.lists, root.reads
+    assert listed > 0 and read > 0
+    second = client.get("/decisiones/hoy")
+    assert second.json() == first.json()
+    assert root.lists == listed
+    assert root.reads == read
+    cached_decision_report(root, now, load_policy(), now_mono=10**9)
+    assert root.lists > listed
+
+
+def test_a_truncated_listing_is_flagged_and_stops():
+    class Cap:
+        def __init__(self):
+            self.limits: list[int | None] = []
+
+        def list_prefix(self, prefix: str, max_results: int | None = None):
+            self.limits.append(max_results)
+            return [f"{prefix}uno.jsonl"], True
+
+        def read_text(self, key: str):
+            return ""
+
+    store = Cap()
+    report = decision_report(store, datetime.now(timezone.utc), load_policy())
+    assert report["truncado"] is True
+    assert store.limits == [MAX_LOG_OBJECTS]
+
+
+def test_unused_judge_answers_are_not_kept():
+    text = "\n".join(
+        [
+            json.dumps(
+                {
+                    "event_type": "PolicyDecided",
+                    "bot": "gambler",
+                    "correlation_id": "c",
+                    "occurred_at": "2026-11-16T18:00:00.000000Z",
+                    "payload": {
+                        "action": "hold",
+                        "reason": "umbral",
+                        "condiciones": ["regimen"],
+                        "snapshot": {"secreto": "NO-CARGAR-SNAPSHOT"},
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "event_type": "BatteryAnswered",
+                    "bot": "gambler",
+                    "correlation_id": "c",
+                    "occurred_at": "2026-11-16T18:00:00.000000Z",
+                    "payload": {
+                        "model_version": "NO-CARGAR-MODELO",
+                        "answers": [{"question_id": "regimen", "probs": {"tendencia": 0.1}}],
+                    },
+                }
+            ),
+        ]
+    )
+    blob = json.dumps(_project_log(text))
+    assert "NO-CARGAR-SNAPSHOT" not in blob
+    assert "NO-CARGAR-MODELO" not in blob
+    assert "tendencia" not in blob
 
 
 def test_old_decision_without_a_battery_stays_unscored():
