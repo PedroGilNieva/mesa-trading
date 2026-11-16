@@ -9,7 +9,7 @@ from decimal import Decimal
 
 from mesa_trading.constants import PINNED_MODEL
 from mesa_trading.loop.cycle import run_cycle
-from mesa_trading.policy.decide import apply_calibration, curves_from_policy, decide, load_policy
+from mesa_trading.policy.decide import apply_calibration, curves_from_policy, decide, load_policy, policy_counts_as_evidence
 from tests.helpers import T0, connector_for, make_env
 
 
@@ -62,6 +62,8 @@ def test_identity_curve_only_applies_in_simulated():
     identity = {"a": "1", "b": "0", "aprobada": True, "fuente": "no autoriza dinero real"}
     assert apply_calibration(probs, curve=identity, mode="real") is None
     assert apply_calibration(probs, curve=identity, mode="live") is None
+    assert apply_calibration(probs, curve=identity, mode="") is None
+    assert policy_counts_as_evidence(load_policy()) is False
     shadowed = apply_calibration(probs, curve={"a": "2", "b": "0", "aprobada": True, "fuente": "x"}, mode="shadow")
     assert shadowed is not None
     assert shadowed["si"] == Decimal("0.6")
@@ -69,6 +71,32 @@ def test_identity_curve_only_applies_in_simulated():
     assert apply_calibration(probs, curve={"a": "1.2", "b": "-0.1"}, mode="simulated") is None
     approved = {"a": "1.2", "b": "-0.1", "aprobada": True, "fuente": "informe interno"}
     assert apply_calibration(probs, curve=approved, mode="simulated") is not None
+    lying = dict(load_policy())
+    lying["cuenta_como_evidencia"] = True
+    assert policy_counts_as_evidence(lying) is False
+    approved_policy = {
+        "version": 3,
+        "cuenta_como_evidencia": True,
+        "curvas": {"gambler.regimen": {"a": "1.2", "b": "-0.1", "aprobada": True, "fuente": "informe"}},
+    }
+    assert policy_counts_as_evidence(approved_policy) is True
+    assert policy_counts_as_evidence({"version": "no"}) is False
+    assert policy_counts_as_evidence({"version": 3, "cuenta_como_evidencia": True, "curvas": {}}) is False
+    assert policy_counts_as_evidence({"version": 3, "cuenta_como_evidencia": True, "curvas": {"x": "no"}}) is False
+    assert policy_counts_as_evidence({"version": 3, "curvas": approved_policy["curvas"]}) is False
+    blank_source = {
+        "version": 3,
+        "cuenta_como_evidencia": True,
+        "curvas": {"gambler.regimen": {"a": "1.2", "b": "0.1", "aprobada": True, "fuente": "  "}},
+    }
+    assert policy_counts_as_evidence(blank_source) is False
+    identity_policy = {
+        "version": 3,
+        "cuenta_como_evidencia": True,
+        "curvas": {"gambler.regimen": {"a": "1", "b": "0", "aprobada": True, "fuente": "x"}},
+    }
+    assert policy_counts_as_evidence(identity_policy) is False
+    assert policy_counts_as_evidence(None) is False
 
 
 def test_house_quotes_a_limit_at_a_quarter_of_capital(tmp_path):
@@ -160,7 +188,7 @@ def test_recorded_strong_answer_enters_and_weak_one_does_not():
     assert weak.action == "hold"
 
 
-def test_a_day_of_recorded_answers_opens_five_to_ten_round_trips(tmp_path):
+def test_a_day_of_recorded_answers_opens_eight_round_trips(tmp_path):
     """288 ciclos, una sola posición. Una respuesta fuerte cada 40 ciclos cierra al siguiente."""
     cycles = 288
     # Cada entrada fuerte va seguida de un ciclo débil que cierra. La última

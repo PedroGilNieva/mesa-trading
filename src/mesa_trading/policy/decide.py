@@ -12,9 +12,39 @@ from mesa_trading.config import default_policy_path
 from mesa_trading.models import Proposal
 
 
+# La version 2 es el periodo de staging con curva identidad. No cuenta como
+# evidencia de edge aunque un evento la marque cuenta_como_evidencia.
+IDENTITY_POLICY_VERSION = 2
+
+
 def load_policy(path: Path | None = None) -> dict[str, Any]:
     target = path or default_policy_path()
     return yaml.safe_load(target.read_text(encoding="utf-8"))
+
+
+def policy_counts_as_evidence(policy: dict[str, Any] | None) -> bool:
+    """Una version cuenta para el GO solo si no es la identidad y todas sus curvas están aprobadas."""
+    if not policy:
+        return False
+    try:
+        version = int(policy.get("version") or 0)
+    except (TypeError, ValueError):
+        return False
+    if version == 0 or version == IDENTITY_POLICY_VERSION:
+        return False
+    if policy.get("cuenta_como_evidencia") is not True:
+        return False
+    curves = policy.get("curvas") or {}
+    if not isinstance(curves, dict) or not curves:
+        return False
+    for body in curves.values():
+        if not isinstance(body, dict) or "a" not in body or "b" not in body:
+            return False
+        if _identity_curve(body):
+            return False
+        if body.get("aprobada") is not True or not str(body.get("fuente") or "").strip():
+            return False
+    return True
 
 
 def curves_from_policy(policy: dict[str, Any] | None) -> dict[str, dict[str, Any]]:

@@ -7,7 +7,11 @@
 # House sí puede cotizar (orden límite al 25% del capital). El SimBroker no la
 # llena si no hay una vela posterior que cruce el límite; hasta ver esos fills,
 # las cotizaciones no son evidencia.
+# cuenta_como_evidencia queda en false: el veredicto y la calibración separan
+# por version, y este periodo (version 2, curva identidad) no entra en el PnL
+# ni en el skill de un GO hacia dinero real.
 version: 2
+cuenta_como_evidencia: false
 curvas:
   gambler.regimen: {a: "1", b: "0", aprobada: false, fuente: "identidad de staging; no es evidencia de edge"}
   gambler.setup: {a: "1", b: "0", aprobada: false, fuente: "identidad de staging; no es evidencia de edge"}

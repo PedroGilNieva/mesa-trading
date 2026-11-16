@@ -6,12 +6,13 @@ import argparse
 import os
 import sys
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 
 from mesa_trading.book.store import equity_usd, note_drawdown
 from mesa_trading.cli.stores import open_book, open_logs
 from mesa_trading.config import default_desk_path, default_promotion_path, load_desk, load_promotion
-from mesa_trading.reports.build import apply_verdict, build_calibration, build_daily, write_reports
+from mesa_trading.reports.build import apply_verdict, build_calibration, build_daily, evidence_snapshot, write_reports
 from mesa_trading.storage import LocalRoot, data_root_from_env
 
 
@@ -34,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     mark = None
     if state.position is not None:
         raw = state.last_prices.get(state.position.market)
-        mark = None if raw is None else __import__("decimal").Decimal(raw)
+        mark = None if raw is None else Decimal(raw)
     equity = equity_usd(state, mark)
     drawdown = note_drawdown(state, equity)
     # Dos días de bitácora, no el bucket entero. El tick ya no depende de este barrido.
@@ -43,15 +44,18 @@ def main(argv: list[str] | None = None) -> int:
     daily = build_daily(events, config, now, book=book_view)
     prior = _load_pairs(args.data_dir)
     calibration = build_calibration(events, promo, config, now, pair_store=prior)
+    # El libro mezcla todos los periodos. El GO solo ve el que cuenta como evidencia.
+    evidence = evidence_snapshot(calibration)
     apply_verdict(
         daily,
         calibration,
         promo,
-        closed_trades=int(state.closed_trades),
-        started_at=state.started_at,
+        closed_trades=int(evidence["cierres"]),
+        started_at=evidence["desde"],
         capital_usd=config.capital_usd,
-        max_drawdown_usd=drawdown,
+        max_drawdown_usd=Decimal(str(evidence["drawdown_usd"])),
         now=now,
+        pnl_usd=Decimal(str(evidence["pnl_usd"])),
     )
     _save_pairs(args.data_dir, calibration.get("pair_store") or {})
     if os.environ.get("MESA_BUCKET"):
