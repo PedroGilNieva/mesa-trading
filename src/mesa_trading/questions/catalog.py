@@ -198,8 +198,30 @@ def battery_for(bot: str) -> tuple[Question, ...]:
         raise KeyError(f"bot sin batería: {bot}") from exc
 
 
-def realized_outcome(question_id: str, future: list[dict], entry: Decimal | None) -> str | None:
+def realized_outcome(
+    question_id: str,
+    future: list[dict],
+    entry: Decimal | None,
+    *,
+    spread_bps: Any = None,
+    liquidity_usd: Any = None,
+    max_spread_bps: Any = None,
+    min_liquidity_usd: Any = None,
+) -> str | None:
     """Clase realizada con velas posteriores al instante de decisión. None si aún no hay horizonte."""
+    if question_id == "ejecucion_degradada":
+        # Antes devolvía siempre "no" y el skill quedaba indefinido. Solo se
+        # etiqueta si guardamos el spread o la liquidez del instante.
+        if spread_bps is None and liquidity_usd is None:
+            return None
+        spread_limit = Decimal(str(max_spread_bps if max_spread_bps is not None else "25"))
+        liquidity_floor = Decimal(str(min_liquidity_usd if min_liquidity_usd is not None else "10000"))
+        degraded = False
+        if spread_bps is not None and Decimal(str(spread_bps)) > spread_limit:
+            degraded = True
+        if liquidity_usd is not None and Decimal(str(liquidity_usd)) < liquidity_floor:
+            degraded = True
+        return "si" if degraded else "no"
     if entry is None or not future:
         return None
     last = Decimal(str(future[-1]["close"]))
@@ -212,8 +234,6 @@ def realized_outcome(question_id: str, future: list[dict], entry: Decimal | None
         return "hold"
     if question_id == "presion_compra":
         return "si" if ret > 0 else "no"
-    if question_id == "ejecucion_degradada":
-        return "no"
     if question_id == "regimen":
         if abs(ret) > Decimal("0.01"):
             return "tendencia"

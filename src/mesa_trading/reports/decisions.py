@@ -6,9 +6,10 @@ import json
 import threading
 import time
 from datetime import datetime, timedelta
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from mesa_trading.policy.decide import gambler_blockers
+from mesa_trading.policy.decide import gambler_blockers, medidas_observadas
 from mesa_trading.storage import DataRoot
 from mesa_trading.util import as_utc
 
@@ -87,7 +88,7 @@ def decision_report(store: DataRoot, now: datetime, policy: dict) -> dict:
         lectura = "ok"
     except Exception:
         events, truncated, lectura = [], False, "no_disponible"
-    summary = summarize(events, (policy or {}).get("gambler") or {})
+    summary = summarize(events, policy or {})
     summary["fecha"] = _cdmx_day(now)
     summary["zona"] = "America/Mexico_City"
     summary["lectura"] = lectura
@@ -99,7 +100,11 @@ def decision_report(store: DataRoot, now: datetime, policy: dict) -> dict:
     return summary
 
 
-def summarize(events: list[dict], gambler_rules: dict) -> dict:
+def summarize(events: list[dict], policy: dict) -> dict:
+    if "gambler" not in policy and "setup_min" in policy:
+        policy = {"gambler": policy}
+    gambler_rules = policy.get("gambler") or {}
+    house_rules = policy.get("house") or {}
     batteries: dict[tuple[str, str], dict] = {}
     decisions = []
     for event in events:
@@ -114,6 +119,15 @@ def summarize(events: list[dict], gambler_rules: dict) -> dict:
     fallos = {name: 0 for name in CONDITIONS}
     evaluated = 0
     sin_desglose = 0
+    house_pausas = {"flujo_toxico": 0, "vale_cotizar": 0, "sin_desglose": 0}
+    muestras: dict[str, list[Decimal]] = {
+        "setup": [],
+        "regimen_tendencia": [],
+        "accion_p": [],
+        "ejecucion_degradada": [],
+        "flujo_toxico": [],
+        "vale_cotizar": [],
+    }
     for event in decisions:
         payload = event.get("payload") or {}
         bot = str(event.get("bot") or "?")
@@ -122,6 +136,16 @@ def summarize(events: list[dict], gambler_rules: dict) -> dict:
         reason = str(payload.get("reason") or "?")
         por_accion[action] = por_accion.get(action, 0) + 1
         por_razon[reason] = por_razon.get(reason, 0) + 1
+        obs = _observados(event, batteries)
+        for key, value in obs.items():
+            if key not in muestras:
+                continue
+            try:
+                muestras[key].append(Decimal(str(value)))
+            except Exception:
+                continue
+        if bot == "house" and action == "pause":
+            _contar_pausa(payload, obs, house_rules, house_pausas)
         if bot != "gambler" or reason not in ENTRY_REASONS:
             continue
         blockers = _blockers(event, batteries, gambler_rules)
@@ -145,8 +169,75 @@ def summarize(events: list[dict], gambler_rules: dict) -> dict:
             "sin_desglose": sin_desglose,
             "fallos_por_condicion": fallos,
             "tasa_paso": tasas,
+            "observado_vs_umbral": {
+                "setup": _vs(muestras["setup"], minimo=gambler_rules.get("setup_min")),
+                "regimen_tendencia": _vs(muestras["regimen_tendencia"], minimo=gambler_rules.get("regimen_tendencia_min_p")),
+                "accion": _vs(muestras["accion_p"], minimo=gambler_rules.get("accion_min_p")),
+                "ejecucion_degradada": _vs(muestras["ejecucion_degradada"], maximo=gambler_rules.get("ejecucion_degradada_max_p")),
+            },
+        },
+        "house": {
+            "pausas_por_condicion": house_pausas,
+            "observado_vs_umbral": {
+                "flujo_toxico": _vs(muestras["flujo_toxico"], maximo=house_rules.get("toxico_max_p")),
+                "vale_cotizar": _vs(muestras["vale_cotizar"], minimo=house_rules.get("vale_cotizar_min")),
+            },
         },
     }
+
+
+def _observados(event: dict, batteries: dict[tuple[str, str], dict]) -> dict:
+    payload = event.get("payload") or {}
+    propios = payload.get("observados") or {}
+    if propios:
+        return {str(key): str(value) for key, value in propios.items()}
+    battery = batteries.get((str(event.get("correlation_id") or ""), str(event.get("bot") or "")))
+    return ((battery or {}).get("payload") or {}).get("medidas") or {}
+
+
+def _contar_pausa(payload: dict, obs: dict, rules: dict, counts: dict) -> None:
+    conds = [str(item) for item in (payload.get("condiciones") or [])]
+    reason = str(payload.get("reason") or "")
+    if conds:
+        for name in conds:
+            if name in ("flujo_toxico", "vale_cotizar"):
+                counts[name] += 1
+        return
+    if reason in ("flujo_toxico", "vale_cotizar"):
+        counts[reason] += 1
+        return
+    if reason != "toxico_o_no_conviene" or not rules:
+        counts["sin_desglose"] += 1
+        return
+    split = False
+    toxic = obs.get("flujo_toxico")
+    vale = obs.get("vale_cotizar")
+    if toxic is not None and Decimal(str(toxic)) >= Decimal(str(rules.get("toxico_max_p"))):
+        counts["flujo_toxico"] += 1
+        split = True
+    if vale is not None and Decimal(str(vale)) < Decimal(str(rules.get("vale_cotizar_min"))):
+        counts["vale_cotizar"] += 1
+        split = True
+    if not split:
+        counts["sin_desglose"] += 1
+
+
+def _vs(values: list[Decimal], *, minimo=None, maximo=None) -> dict:
+    body = {"n": len(values), "p50": _pct(values, Decimal("0.5")), "p90": _pct(values, Decimal("0.9")), "max": _pct(values, Decimal("1"))}
+    if minimo is not None:
+        body["umbral_min"] = str(minimo)
+    if maximo is not None:
+        body["umbral_max"] = str(maximo)
+    return body
+
+
+def _pct(values: list[Decimal], q: Decimal) -> str | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = int((q * Decimal(len(ordered) - 1)).to_integral_value())
+    index = min(max(index, 0), len(ordered) - 1)
+    return format(ordered[index], "f")
 
 
 def _blockers(event: dict, batteries: dict[tuple[str, str], dict], rules: dict) -> list[str] | None:
@@ -226,17 +317,31 @@ def _project_log(text: str) -> list[dict]:
             kept = {"action": payload.get("action"), "reason": payload.get("reason")}
             if "condiciones" in payload:
                 kept["condiciones"] = [str(value) for value in (payload.get("condiciones") or [])]
+            if payload.get("observados"):
+                kept["observados"] = {str(key): str(value) for key, value in payload["observados"].items()}
             item["payload"] = kept
-        elif str(event.get("correlation_id") or "") in needed and event.get("bot") == "gambler":
-            answers = []
-            for answer in payload.get("answers") or []:
-                qid = str(answer.get("question_id") or "")
-                if qid not in CONDITIONS:
-                    continue
-                answers.append({"question_id": qid, "probs": answer.get("probs"), "score": answer.get("score")})
-            item["payload"] = {"answers": answers}
+        else:
+            answers = payload.get("answers") or []
+            item["payload"] = {"medidas": _medidas_de_respuestas(event.get("bot"), answers)}
+            if str(event.get("correlation_id") or "") in needed and event.get("bot") == "gambler":
+                kept = []
+                for answer in answers:
+                    qid = str(answer.get("question_id") or "")
+                    if qid not in CONDITIONS:
+                        continue
+                    kept.append({"question_id": qid, "probs": answer.get("probs"), "score": answer.get("score")})
+                item["payload"]["answers"] = kept
         slim.append(item)
     return slim
+
+
+def _medidas_de_respuestas(bot: str | None, answers: list) -> dict:
+    mapped = {}
+    for answer in answers or []:
+        qid = answer.get("question_id")
+        if qid:
+            mapped[str(qid)] = answer
+    return medidas_observadas(str(bot or ""), mapped)
 
 
 def _parse_lines(text: str):

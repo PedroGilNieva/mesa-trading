@@ -148,6 +148,39 @@ def _p(answer: dict, option: str) -> Decimal | None:
     return Decimal(str(probs[option]))
 
 
+def medidas_observadas(bot: str, answers: dict) -> dict[str, str]:
+    """Números que se comparan con el umbral. Sin el texto del juez."""
+    if bot == "gambler":
+        accion = (answers.get("accion") or {}).get("probs") or {}
+        top = max(accion, key=accion.get) if accion else ""
+        return _fmt_medidas(
+            {
+                "setup": _score(answers.get("setup") or {}),
+                "regimen_tendencia": _p(answers.get("regimen") or {}, "tendencia"),
+                "accion_top": top,
+                "accion_p": Decimal(str(accion[top])) if top else None,
+                "ejecucion_degradada": _p(answers.get("ejecucion_degradada") or {}, "si"),
+            }
+        )
+    if bot == "house":
+        return _fmt_medidas(
+            {
+                "flujo_toxico": _p(answers.get("flujo_toxico") or {}, "si"),
+                "vale_cotizar": _score(answers.get("vale_cotizar") or {}),
+            }
+        )
+    return {}
+
+
+def _fmt_medidas(raw: dict) -> dict[str, str]:
+    out = {}
+    for key, value in raw.items():
+        if value is None or value == "":
+            continue
+        out[key] = value if isinstance(value, str) else format(Decimal(str(value)), "f")
+    return out
+
+
 def _score(answer: dict) -> Decimal | None:
     if answer.get("score") is not None:
         return Decimal(str(answer["score"]))
@@ -193,6 +226,7 @@ def _gambler(market, kind, answers, capital, rules, version, managing) -> Propos
     common = dict(bot="gambler", market=market, kind=kind, threshold_version=version, thresholds=dict(rules))
     if p_trend is None or setup is None or p_bad is None:
         return _hold("gambler", market, kind, version, rules, "dato_faltante")
+    common["observados"] = medidas_observadas("gambler", answers)
     failed = gambler_blockers(answers, rules) or []
     exit_now = (
         p_trend < Decimal(str(rules["regimen_tendencia_min_p"]))
@@ -227,12 +261,19 @@ def _house(market, kind, answers, capital, rules, version, managing) -> Proposal
     common = dict(bot="house", market=market, kind=kind, threshold_version=version, thresholds=dict(rules))
     if None in (p_break, p_toxic, worth, p_vol):
         return _hold("house", market, kind, version, rules, "dato_faltante")
+    common["observados"] = medidas_observadas("house", answers)
     if p_break >= Decimal(str(rules["ruptura_min_p"])):
         return Proposal(**common, action="close" if managing else "pause", reason="ruptura", is_entry=False)
     if p_vol < Decimal(str(rules["volumen_min_p"])):
         return Proposal(**common, action="close" if managing else "pause", reason="sin_volumen", is_entry=False)
-    if p_toxic >= Decimal(str(rules["toxico_max_p"])) or worth < Decimal(str(rules["vale_cotizar_min"])):
-        return Proposal(**common, action="pause", reason="toxico_o_no_conviene", is_entry=False)
+    failed = []
+    if p_toxic >= Decimal(str(rules["toxico_max_p"])):
+        failed.append("flujo_toxico")
+    if worth < Decimal(str(rules["vale_cotizar_min"])):
+        failed.append("vale_cotizar")
+    if failed:
+        reason = failed[0] if len(failed) == 1 else "toxico_y_no_conviene"
+        return Proposal(**common, action="pause", reason=reason, condiciones=failed, is_entry=False)
     if managing:
         return Proposal(**common, action="hold", reason="mantener_grid", is_entry=False)
     return Proposal(
