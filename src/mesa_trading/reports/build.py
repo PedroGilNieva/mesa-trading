@@ -200,18 +200,43 @@ def _readiness_by_bot(questions: dict, promo: PromotionConfig, events: list[dict
     return per_bot
 
 
+def _version_rank(body: dict) -> int:
+    raw = body.get("threshold_version")
+    if raw is None:
+        return -1
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return -1
+
+
 def evidence_snapshot(calibration: dict) -> dict:
-    """El GO usa el periodo de evidencia más nuevo. La version 2 no entra."""
+    """El GO mira solo el periodo de threshold_version más alto.
+
+    Si ese periodo no cuenta (version 2, sin aprobar, o sin version), el
+    veredicto queda sin evidencia. No se usa un periodo anterior.
+    """
     chosen = None
+    rank = -2
     for body in (calibration.get("periodos") or {}).values():
-        if not body.get("cuenta_como_evidencia"):
-            continue
-        version = int(body.get("threshold_version") or -1)
-        if chosen is None or version > int(chosen.get("threshold_version") or -1):
+        version = _version_rank(body)
+        if chosen is None or version > rank:
             chosen = body
-    if chosen is None:
+            rank = version
+    version = None if chosen is None else chosen.get("threshold_version")
+    try:
+        number = None if version is None else int(version)
+    except (TypeError, ValueError):
+        number = None
+    counts = (
+        chosen is not None
+        and number is not None
+        and number != IDENTITY_POLICY_VERSION
+        and bool(chosen.get("cuenta_como_evidencia"))
+    )
+    if not counts:
         return {
-            "threshold_version": None,
+            "threshold_version": number,
             "cuenta_como_evidencia": False,
             "cierres": 0,
             "pnl_usd": "0",
@@ -219,7 +244,7 @@ def evidence_snapshot(calibration: dict) -> dict:
             "drawdown_usd": "0",
         }
     return {
-        "threshold_version": chosen.get("threshold_version"),
+        "threshold_version": number,
         "cuenta_como_evidencia": True,
         "cierres": int(chosen.get("cierres") or 0),
         "pnl_usd": str(chosen.get("pnl_usd") or "0"),
@@ -248,10 +273,11 @@ def build_calibration(
             "preguntas": _score_questions(period.get("pares") or {}),
         }
     snap = evidence_snapshot({"periodos": periodos_public})
-    evidence_key = None if snap["threshold_version"] is None else str(snap["threshold_version"])
     evidence_pares = {}
-    if evidence_key and evidence_key in store["periodos"]:
-        evidence_pares = store["periodos"][evidence_key].get("pares") or {}
+    if snap["cuenta_como_evidencia"] and snap["threshold_version"] is not None:
+        evidence_key = str(snap["threshold_version"])
+        if evidence_key in store["periodos"]:
+            evidence_pares = store["periodos"][evidence_key].get("pares") or {}
     questions = _score_questions(evidence_pares)
     return {
         "fecha": _cdmx_date(now),
@@ -812,7 +838,11 @@ def apply_verdict(
     rate = (closed_trades / days) if days >= 1 / 24 and closed_trades else 0.0
     remaining = max(int(promo.min_closed_trades) - int(closed_trades), 0)
     days_left = (remaining / rate) if rate > 0 else None
-    pnl = pnl_usd if pnl_usd is not None else Decimal(str(daily.get("pnl_acumulado_usd") or "0"))
+    # El PnL del diario mezcla periodos. Sin uno explícito se usa el del snapshot,
+    # que es cero cuando el periodo más nuevo no cuenta como evidencia.
+    if pnl_usd is None:
+        pnl_usd = Decimal(str(evidence_snapshot(calibration)["pnl_usd"]))
+    pnl = pnl_usd
     # El corte usa el peor pico-a-valle guardado, no el hueco que queda ahora
     # si el capital ya rebotó.
     drawdown_pct = (max_drawdown_usd / capital_usd) if capital_usd else Decimal("0")
@@ -868,11 +898,18 @@ def apply_verdict(
 
 
 def _evidence_note(calibration: dict) -> str:
-    version = (calibration.get("evidencia") or {}).get("threshold_version")
+    evidencia = calibration.get("evidencia") or {}
+    version = evidencia.get("threshold_version")
     if version is None:
         return (
             "No hay un periodo que cuente como evidencia. "
             "El PnL y el skill de la version 2 (curva identidad) no entran en este veredicto."
+        )
+    if not evidencia.get("cuenta_como_evidencia"):
+        return (
+            f"El periodo más nuevo es la version {version} y no cuenta como evidencia. "
+            "El veredicto no vuelve a un periodo anterior. "
+            "La version 2, con curva identidad, tampoco entra en el PnL ni en el skill."
         )
     return (
         f"Este veredicto usa solo la version {version}. "

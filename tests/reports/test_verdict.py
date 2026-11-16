@@ -113,6 +113,7 @@ def test_verdict_no_go_on_drawdown_and_go_when_sample_is_good():
         capital_usd=Decimal("1000"),
         max_drawdown_usd=Decimal("10"),
         now=NOW,
+        pnl_usd=Decimal("12.5"),
     )
     assert opened["veredicto"]["estado"] == "go_tentativo"
 
@@ -161,6 +162,7 @@ def test_flat_pnl_after_the_sample_is_no_go():
         capital_usd=Decimal("1000"),
         max_drawdown_usd=Decimal("0"),
         now=NOW,
+        pnl_usd=Decimal("0"),
     )
     assert report["veredicto"]["estado"] == "no_go"
 
@@ -269,3 +271,85 @@ def test_identity_period_does_not_count_toward_a_real_money_go():
     assert opened["veredicto"]["estado"] == "go_tentativo"
     assert opened["veredicto"]["pnl_acumulado_usd"] == "20.00"
     assert "version 3" in opened["veredicto"]["nota"]
+
+
+def test_a_newer_period_that_does_not_count_blocks_the_previous_one():
+    """v3 podía ser GO. v4 posterior, sin evidencia, deja el veredicto en insuficiente."""
+    promo = load_promotion(repo_root() / "config" / "promotion.yaml")
+    config = load_desk(repo_root() / "config" / "desk.yaml")
+    started = (NOW - timedelta(days=20)).strftime("%Y-%m-%dT%H:%M:%S.000000Z")
+    events = []
+    for index in range(200):
+        events.append(
+            {
+                "event_id": f"c{index}",
+                "event_type": "PositionClosed",
+                "occurred_at": started,
+                "bot": "gambler",
+                "mode": "simulated",
+                "payload": {"pnl_usd": "0.10", "threshold_version": 3, "cuenta_como_evidencia": True},
+            }
+        )
+    for index, (prob, outcome) in enumerate([(0.8, "si"), (0.8, "si"), (0.2, "no"), (0.2, "no")]):
+        events.extend(_resolved(f"v3-{index}", 3, True, prob, outcome, started))
+    events.append(
+        {
+            "event_id": "v4",
+            "event_type": "PositionClosed",
+            "occurred_at": "2026-11-20T17:00:00.000000Z",
+            "bot": "gambler",
+            "mode": "simulated",
+            "payload": {"pnl_usd": "999", "threshold_version": 4, "cuenta_como_evidencia": False},
+        }
+    )
+    calibration = build_calibration(events, promo, config, NOW)
+    snap = evidence_snapshot(calibration)
+    assert snap["threshold_version"] == 4
+    assert snap["cuenta_como_evidencia"] is False
+    assert snap["cierres"] == 0
+    assert snap["pnl_usd"] == "0"
+    assert calibration["preguntas"]["gambler"]["regimen"]["n"] == 0
+    assert calibration["periodos"]["3"]["cierres"] == 200
+    daily = _daily()
+    daily["pnl_acumulado_usd"] = "999"
+    report = apply_verdict(
+        daily,
+        calibration,
+        promo,
+        closed_trades=snap["cierres"],
+        started_at=snap["desde"],
+        capital_usd=Decimal("1000"),
+        max_drawdown_usd=Decimal(snap["drawdown_usd"]),
+        now=NOW,
+    )
+    assert report["veredicto"]["estado"] == "insuficiente"
+    assert report["veredicto"]["operaciones_cerradas"] == 0
+    assert report["veredicto"]["pnl_acumulado_usd"] == "0"
+    assert report["veredicto"]["brier_skill_min"] is None
+    assert "no vuelve" in report["veredicto"]["nota"]
+    # La version 2 marcada a mano como evidencia tampoco se hereda de un periodo anterior.
+    forced = evidence_snapshot(
+        {
+            "periodos": {
+                "1": {
+                    "threshold_version": 1,
+                    "cuenta_como_evidencia": True,
+                    "cierres": 200,
+                    "pnl_usd": "20",
+                    "desde": started,
+                    "drawdown_usd": "0",
+                },
+                "2": {
+                    "threshold_version": 2,
+                    "cuenta_como_evidencia": True,
+                    "cierres": 200,
+                    "pnl_usd": "20",
+                    "desde": started,
+                    "drawdown_usd": "0",
+                },
+            }
+        }
+    )
+    assert forced["threshold_version"] == 2
+    assert forced["cuenta_como_evidencia"] is False
+    assert forced["cierres"] == 0
