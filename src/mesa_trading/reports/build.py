@@ -358,6 +358,16 @@ def render_daily_md(report: dict) -> str:
     for bot, count in report["decisiones_por_bot"].items():
         lines.append(f"- {bot}: {count}")
     lines.append("")
+    lines.append("## Decisiones por acción y motivo")
+    actions = report.get("decisiones_por_accion") or {}
+    reasons = report.get("decisiones_por_razon") or {}
+    if not actions and not reasons:
+        lines.append("- Sin desglose")
+    for action, count in actions.items():
+        lines.append(f"- acción {action}: {count}")
+    for reason, count in reasons.items():
+        lines.append(f"- motivo {reason}: {count}")
+    lines.append("")
     lines.append("## Vetos por regla")
     if not report["vetos_por_regla"]:
         lines.append("- Ninguno")
