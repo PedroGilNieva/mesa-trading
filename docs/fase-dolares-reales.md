@@ -26,11 +26,24 @@ este PR.
 | Apalancamiento | 1x, una sola posición, como hoy |
 
 Esos tres números están en `real_money` y el validador no acepta subirlos.
-El halt diario que ya existe en simulado (5% del capital) se queda. En real
-se le suma el tope absoluto de 10 USD: al cruzarlo, la mesa cancela la
-orden viva, cierra la posición y no vuelve a entrar hasta el día siguiente
-en Ciudad de México. Un kill switch aparte, también apagado, hace lo mismo
-en el acto si Pedro lo pide.
+`RealMoneyConfig` está congelada: no se puede reasignar `enabled` después
+de cargar. El capital que usaría la fase es `min(capital_usd, 100)`. La
+mesa de papel de staging sigue en 1000 USD; no se le aplica este tope.
+
+El nocional que se mandaría ya descuenta comisión y slippage. Tiene que
+caber en 25 USD, en los 100 USD de capital y en el saldo. Si no cabe, se
+recorta; no se manda un tamaño que el costo empuje por encima del tope.
+
+El halt diario del simulado (5% del capital) no cambia. La fase real suma
+un tope absoluto de 10 USD de PnL realizado en el día de Ciudad de México.
+Al cruzarlo, o si Pedro acciona el kill switch, se cancela la orden viva,
+se aplana la posición con una orden de mercado y no se reabre hasta la
+medianoche de Ciudad de México. Si el proceso arranca con una posición o
+una orden viva —se cayó a medias—, hace lo mismo antes de operar.
+
+Eso está en `real_money.py` y se prueba contra `SimBroker`. El tick de
+staging no lo llama. El flag no puede encenderse, así que el servicio
+simulado no aplana ni usa estos topes.
 
 ## Llaves
 
@@ -42,19 +55,31 @@ Los pasos, para cuando Pedro lo decida:
    dedicada a esta fase. La cuenta de esa wallet no debe tener más de los
    100 USD de arriba.
 2. Dar `roles/secretmanager.secretAccessor` sobre ese secreto únicamente a
-   la cuenta de servicio que ya corre el tick. Ningún otro rol, y nada a
-   nivel de organización.
-3. El proceso la leería en el momento de la orden, con el mismo patrón que
+   la cuenta de servicio del tick. No a la cuenta de la API pública, no a
+   ninguna otra cuenta, y nada a nivel de organización. La API solo lee
+   reportes; no debe poder leer la llave.
+3. Esa wallet es de la fase real. No es la del servicio simulado de
+   staging y no se carga en ese proceso. El simulado no firma, no tiene
+   saldo real y no comparte secreto con esta wallet.
+4. El proceso la leería en el momento de la orden, con el mismo patrón que
    `GcpSecretKey`, y no la escribiría en el env del repo, en la imagen ni
-   en los logs.
-4. Rotarla o borrarla es borrar la versión del secreto. No hace falta
+   en los logs. Si Secret Manager falla o no hay versión, no se manda la
+   orden: se queda la posición como está. No hay camino que opere sin llave.
+5. Rotarla o borrarla es borrar la versión del secreto. No hace falta
    redeploy para dejar de poder firmar si se deshabilita la versión.
+
+## Idempotencia
+
+El `client_order_id` se convierte en el `cloid` de Hyperliquid (0x y 16
+bytes). Un reintento manda el mismo cloid y no cruza otra vez. El segundo
+intento devuelve el ack del primero.
 
 ## Flag
 
 `real_money.enabled: false`. Si alguien lo pone en true, `load_desk` falla
-antes de arrancar. Encenderlo es otro PR, después del OK de Pedro, que
-además tendría que implementar el broker. Este borrador no lo trae.
+antes de arrancar, y asignarlo después también falla porque el modelo está
+congelado. Encenderlo es otro PR, después del OK de Pedro, que además
+tendría que conectar el broker. Este borrador no lo conecta.
 
 ## Evidencia antes de encender
 

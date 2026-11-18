@@ -3,6 +3,7 @@
 from decimal import Decimal
 
 import pytest
+from pydantic import ValidationError
 
 from mesa_trading.config import load_desk, repo_root
 
@@ -22,3 +23,9 @@ def test_real_money_cannot_be_enabled(tmp_path):
     path.write_text(text.replace("real_money:\n  enabled: false", "real_money:\n  enabled: true"), encoding="utf-8")
     with pytest.raises(ValueError, match="dinero real sigue apagado"):
         load_desk(path)
+
+
+def test_real_money_config_is_frozen():
+    config = load_desk(repo_root() / "config" / "desk.yaml")
+    with pytest.raises(ValidationError):
+        config.real_money.enabled = True

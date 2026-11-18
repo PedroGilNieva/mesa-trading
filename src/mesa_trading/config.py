@@ -109,7 +109,7 @@ class FilterConfig(BaseModel):
 class RealMoneyConfig(BaseModel):
     """Borrador. Encenderlo exige otro PR y el OK explícito de Pedro."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_assignment=True)
 
     enabled: bool = False
     venue: str = "hyperliquid"
