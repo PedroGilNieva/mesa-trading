@@ -6,7 +6,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class Order(BaseModel):
@@ -96,7 +96,7 @@ class BookState(BaseModel):
 
     cash_usd: Decimal
     day_start_equity_usd: Decimal
-    day_start_utc: str
+    day_start_cdmx: str
     realized_pnl_usd: Decimal = Decimal("0")
     day_realized_pnl_usd: Decimal = Decimal("0")
     fees_usd: Decimal = Decimal("0")
@@ -119,6 +119,17 @@ class BookState(BaseModel):
     max_drawdown_usd: Decimal = Decimal("0")
     # Los últimos fills, para /estado, sin releer la bitácora.
     recent_fills: list[dict[str, Any]] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def read_legacy_day(cls, data):
+        """El libro viejo guardaba el día UTC en day_start_utc."""
+        if not isinstance(data, dict) or "day_start_utc" not in data:
+            return data
+        data = dict(data)
+        data.setdefault("day_start_cdmx", data.pop("day_start_utc"))
+        data.pop("day_start_utc", None)
+        return data
 
 
 class Proposal(BaseModel):

@@ -18,7 +18,7 @@ def fresh_book(capital: Decimal, now: datetime) -> BookState:
     return BookState(
         cash_usd=capital,
         day_start_equity_usd=capital,
-        day_start_utc=day,
+        day_start_cdmx=day,
         peak_equity_usd=capital,
         equity_hwm_usd=capital,
     )

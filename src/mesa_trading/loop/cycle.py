@@ -170,6 +170,7 @@ def _consider(env, state, bot, market, mode, cycle_id, now, funnel, managing, ra
     if bot == "house":
         raw["inventory"] = str(state.position.qty) if state.position and state.position.market == market else "0"
     snapshot = build_snapshot(bot, market, raw, now)
+    _note_mark(state, market, _tick_price(raw, snapshot, now))
     _emit(
         env,
         "SnapshotComputed",
@@ -882,10 +883,15 @@ def _maybe_halt(env, state, cycle_id, now) -> None:
 
 def _roll_day(env, state, cycle_id, now) -> bool:
     day = _cdmx_day(now)
-    if state.day_start_utc == day:
+    stored = state.day_start_cdmx
+    if stored >= day:
+        # Igual: este día ya empezó. Posterior: el libro viejo trae el día UTC
+        # de mañana (después de las 18:00 CDMX) y bajarlo pondría el PnL en
+        # cero y quitaría el halt a media tarde.
+        _extend_legacy_halt(state, now)
         return False
     was = state.halted_until is not None
-    state.day_start_utc = day
+    state.day_start_cdmx = day
     state.day_start_equity_usd = equity_usd(state, _last_mark(state))
     state.day_realized_pnl_usd = Decimal("0")
     state.halted_until = None
@@ -1000,8 +1006,39 @@ def _order_side(action: str) -> str:
     return "sell" if action == "short" else "buy"
 
 
+def _note_mark(state, market: str, mark: Decimal | None) -> None:
+    """El precio de este tick, no solo el del último fill."""
+    if mark is None or mark <= 0:
+        return
+    if state.position is not None and state.position.market == market:
+        state.last_prices[market] = format(mark, "f")
+
+
+def _tick_price(raw: dict, snapshot: dict, now: datetime) -> Decimal | None:
+    book = raw.get("order_book") if isinstance(raw, dict) else None
+    bid, ask = _touch(book if isinstance(book, dict) else None, now)
+    if bid is not None and ask is not None and bid > 0 and ask > 0:
+        return (bid + ask) / Decimal("2")
+    return _mark(snapshot)
+
+
 def _cdmx_day(now: datetime) -> str:
     return as_utc(now).astimezone(CDMX).date().isoformat()
+
+
+def _extend_legacy_halt(state, now: datetime) -> None:
+    """Un halt viejo vencía a medianoche UTC. Se alarga hasta la de Ciudad de México."""
+    if state.halted_until is None:
+        return
+    until = as_utc(state.halted_until)
+    if (until.hour, until.minute, until.second, until.microsecond) != (0, 0, 0, 0):
+        return
+    cdmx = datetime.fromisoformat(_cdmx_day(now)).date()
+    if until.date() != cdmx + timedelta(days=1):
+        return
+    target = _next_midnight(now)
+    if target > until:
+        state.halted_until = target
 
 
 def _next_midnight(now: datetime) -> datetime:
