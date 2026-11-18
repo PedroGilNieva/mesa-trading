@@ -106,6 +106,32 @@ class FilterConfig(BaseModel):
     max_fee_fraction: Decimal = Decimal("0.02")
 
 
+class RealMoneyConfig(BaseModel):
+    """Borrador. Encenderlo exige otro PR y el OK explícito de Pedro."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    venue: str = "hyperliquid"
+    max_capital_usd: Decimal = Decimal("100")
+    max_order_usd: Decimal = Decimal("25")
+    max_daily_loss_usd: Decimal = Decimal("10")
+
+    @model_validator(mode="after")
+    def stay_off(self) -> RealMoneyConfig:
+        if self.enabled:
+            raise ValueError("dinero real sigue apagado: hace falta el OK explícito de Pedro y otro PR")
+        if self.max_capital_usd > Decimal("100"):
+            raise ValueError("el capital real no puede pasar de 100 USD")
+        if self.max_order_usd > Decimal("25"):
+            raise ValueError("una operación real no puede pasar de 25 USD")
+        if self.max_daily_loss_usd > Decimal("10"):
+            raise ValueError("la pérdida diaria real no puede pasar de 10 USD")
+        if self.venue != "hyperliquid":
+            raise ValueError("el borrador solo contempla Hyperliquid")
+        return self
+
+
 class DeskConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -122,6 +148,7 @@ class DeskConfig(BaseModel):
     filters: FilterConfig = Field(default_factory=FilterConfig)
     policy_version: int = 1
     data_retries: int = 2
+    real_money: RealMoneyConfig = Field(default_factory=RealMoneyConfig)
 
     @model_validator(mode="after")
     def required_bots(self) -> DeskConfig:
