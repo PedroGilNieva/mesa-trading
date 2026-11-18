@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from mesa_trading.book.store import BookStore, close_position, equity_usd, note_drawdown, open_position
 from mesa_trading.broker.factory import make_broker
@@ -23,6 +24,8 @@ from mesa_trading.questions.catalog import battery_for, realized_outcome
 from mesa_trading.risk.engine import RiskFacts, evaluate
 from mesa_trading.state.snapshot import LIVE_QUOTE_SKEW, build_snapshot
 from mesa_trading.util import as_utc, client_order_id, iso
+
+CDMX = ZoneInfo("America/Mexico_City")
 
 POLICY_FIELDS = {
     "gambler": ("regimen", "setup", "accion", "ejecucion_degradada"),
@@ -481,7 +484,8 @@ def _open_filled(
             "client_order_id": fill.client_order_id,
             "market": market,
             "action": action,
-            "side": "short" if action == "short" else "buy",
+            "side": _position_side(action),
+            "order_side": _order_side(action),
             "notional_usd": str(notional_usd),
             "price": str(fill.price),
             "fee_usd": str(fill.fee_usd),
@@ -512,6 +516,7 @@ def _open_filled(
         market=market,
         action=action,
         side=position.side,
+        order_side=_order_side(action),
         price=str(fill.price),
         price_source=fill.price_source,
         notional_usd=str(notional_usd),
@@ -599,7 +604,8 @@ def _close(env, state, cycle_id, now, mode, reason, snapshot, book=None) -> int:
         bot=pos.bot,
         market=pos.market,
         action="close",
-        side=order.side,
+        side=pos.side,
+        order_side=order.side,
         price=str(fill.price),
         price_source=fill.price_source,
         notional_usd=str(order.notional_usd),
@@ -619,9 +625,12 @@ def _close(env, state, cycle_id, now, mode, reason, snapshot, book=None) -> int:
             "client_order_id": fill.client_order_id,
             "market": pos.market,
             "action": "close",
-            "side": order.side,
+            "side": pos.side,
+            "order_side": order.side,
             "notional_usd": str(order.notional_usd),
             "price": str(fill.price),
+            "fee_usd": str(fill.fee_usd),
+            "slippage_usd": str(fill.slippage_usd),
             "reason": reason,
             "pnl_usd": str(pnl),
             "price_source": fill.price_source,
@@ -872,7 +881,7 @@ def _maybe_halt(env, state, cycle_id, now) -> None:
 
 
 def _roll_day(env, state, cycle_id, now) -> bool:
-    day = now.strftime("%Y-%m-%d")
+    day = _cdmx_day(now)
     if state.day_start_utc == day:
         return False
     was = state.halted_until is not None
@@ -982,9 +991,23 @@ def _last_mark(state) -> Decimal | None:
     return Decimal(raw) if raw else state.position.entry_price
 
 
+def _position_side(action: str) -> str:
+    return "short" if action == "short" else "long"
+
+
+def _order_side(action: str) -> str:
+    """Compra abre un long o cierra un short. Vender es al revés."""
+    return "sell" if action == "short" else "buy"
+
+
+def _cdmx_day(now: datetime) -> str:
+    return as_utc(now).astimezone(CDMX).date().isoformat()
+
+
 def _next_midnight(now: datetime) -> datetime:
-    day = as_utc(now).date()
-    return datetime(day.year, day.month, day.day, tzinfo=now.tzinfo) + timedelta(days=1)
+    local = as_utc(now).astimezone(CDMX)
+    nxt = datetime(local.year, local.month, local.day, tzinfo=CDMX) + timedelta(days=1)
+    return nxt.astimezone(timezone.utc)
 
 
 def _finish(env, state, generation, cycle_id, now, result, funnel) -> None:

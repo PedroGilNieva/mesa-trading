@@ -99,3 +99,22 @@ def test_a24_daily_summary_is_after_costs_and_in_cdmx():
     text = render_daily_md(report)
     assert "Ciudad de México" in text
     assert "después de comisiones y slippage" in text
+
+
+def test_old_fill_without_market_still_counts():
+    events = [
+        {
+            "event_type": "OrderFilled",
+            "occurred_at": "2026-11-06T17:56:00.000000Z",
+            "bot": "house",
+            "mode": "simulated",
+            "payload": {"client_order_id": "viejo", "price": "1800", "price_source": "cruce_limite"},
+            "event_id": "old",
+            "correlation_id": "c",
+        }
+    ]
+    report = build_daily(events, load_desk(repo_root() / "config" / "desk.yaml"), NOW)
+    fill = report["operaciones_simuladas"][0]
+    assert fill["bot"] == "house"
+    assert fill.get("market") is None
+    assert fill["price"] == "1800"

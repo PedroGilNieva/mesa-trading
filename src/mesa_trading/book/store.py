@@ -6,6 +6,7 @@ import json
 import threading
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from mesa_trading.models import BookState, Position
@@ -13,7 +14,7 @@ from mesa_trading.util import as_utc, iso
 
 
 def fresh_book(capital: Decimal, now: datetime) -> BookState:
-    day = as_utc(now).strftime("%Y-%m-%d")
+    day = as_utc(now).astimezone(ZoneInfo("America/Mexico_City")).date().isoformat()
     return BookState(
         cash_usd=capital,
         day_start_equity_usd=capital,
@@ -33,6 +34,16 @@ def note_drawdown(book: BookState, equity: Decimal) -> Decimal:
     if current > book.max_drawdown_usd:
         book.max_drawdown_usd = current
     return book.max_drawdown_usd
+
+
+def unrealized_pnl(book: BookState, mark: Decimal | None = None) -> Decimal:
+    """PnL de precio de la posición abierta. Las comisiones ya salieron del cash."""
+    if book.position is None:
+        return Decimal("0")
+    price = mark if mark is not None else book.position.entry_price
+    if book.position.side == "long":
+        return (price - book.position.entry_price) * book.position.qty
+    return (book.position.entry_price - price) * book.position.qty
 
 
 def equity_usd(book: BookState, mark: Decimal | None = None) -> Decimal:
