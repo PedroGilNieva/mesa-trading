@@ -18,3 +18,6 @@ def test_simulated_cycle_fills_at_the_book(tmp_path):
     assert state.position is not None
     assert state.position.entry_price > Decimal("0")
     assert state.closed_trades == 0
+    assert state.recent_fills[-1]["bot"] == "gambler"
+    assert state.recent_fills[-1]["market"] == "BTC-PERP"
+    assert state.recent_fills[-1]["reason"] == "entrada"

@@ -305,6 +305,7 @@ def build_daily(events: list[dict], config: DeskConfig, now: datetime, book: dic
     reached: dict[str, int] = defaultdict(int)
     judge_status: dict[str, int] = defaultdict(int)
     fills = []
+    pnl_por_bot: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
     tokens = 0
     finished = 0
     halted = []
@@ -331,7 +332,11 @@ def build_daily(events: list[dict], config: DeskConfig, now: datetime, book: dic
             for step, count in (funnel.get("alcanzados") or payload.get("funnel_reached") or {}).items():
                 reached[step] += int(count)
         elif kind == "OrderFilled":
-            fills.append(payload)
+            row = dict(payload)
+            row["bot"] = event.get("bot") or row.get("bot") or "?"
+            fills.append(row)
+        elif kind == "PositionClosed":
+            pnl_por_bot[event.get("bot") or "?"] += Decimal(str(payload.get("pnl_usd") or "0"))
         elif kind == "BatteryAnswered":
             judge_calls += 1
             judge_status["answered"] += 1
@@ -385,6 +390,7 @@ def build_daily(events: list[dict], config: DeskConfig, now: datetime, book: dic
         "decisiones_por_accion": dict(decision_actions),
         "decisiones_por_razon": dict(decision_reasons),
         "operaciones_simuladas": fills,
+        "pnl_por_bot": {bot: format(amount, "f") for bot, amount in pnl_por_bot.items()},
         "pnl_dia_usd": pnl_day,
         "pnl_acumulado_usd": (book or {}).get("realized_pnl_usd", pnl_day),
         "drawdown_maximo_usd": (book or {}).get("drawdown_usd", "0"),

@@ -88,6 +88,7 @@ def test_a24_daily_summary_is_after_costs_and_in_cdmx():
     ]
     report = build_daily(events, load_desk(repo_root() / "config" / "desk.yaml"), NOW, book={"realized_pnl_usd": "-1.25", "drawdown_usd": "1.25"})
     assert Decimal(report["pnl_dia_usd"]) == Decimal("-1.25")
+    assert report["pnl_por_bot"]["gambler"] == "-1.25"
     assert report["vetos_por_regla"]["economia"] == 1
     assert report["rechazos_por_paso"]["hechos_duros"] == 1
     assert report["rechazos_por_motivo"]["spread_ancho"] == 1
