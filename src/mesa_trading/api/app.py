@@ -42,6 +42,11 @@ def create_app(root: DataRoot | None = None, desk_path: Path | None = None) -> F
             "ultimo_ciclo": state.get("last_cycle_id"),
             "ultimo_ciclo_en": state.get("last_cycle_at"),
             "operaciones_cerradas": state.get("closed_trades", 0),
+            "pnl_realizado_usd": state.get("realized_pnl_usd", "0"),
+            "pnl_dia_usd": state.get("day_realized_pnl_usd", "0"),
+            "comisiones_usd": state.get("fees_usd", "0"),
+            "deslizamiento_usd": state.get("slippage_usd", "0"),
+            "ultimos_fills": state.get("recent_fills") or [],
             "posicion_abierta": position,
             "resting_order": state.get("resting_order"),
             "vetos_activos": {

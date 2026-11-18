@@ -20,6 +20,13 @@ def test_estado_reads_the_book_and_does_not_list_logs(tmp_path):
                     "last_cycle_id": "20261112T171500Z",
                     "last_cycle_at": "2026-11-12T17:15:00.000000Z",
                     "closed_trades": 3,
+                    "realized_pnl_usd": "-1.25",
+                    "day_realized_pnl_usd": "-1.25",
+                    "fees_usd": "0.40",
+                    "slippage_usd": "0.05",
+                    "recent_fills": [
+                        {"bot": "house", "market": "WETH-USDC", "action": "quote", "reason": "cotizacion_llenada"}
+                    ],
                     "resting_order": {"client_order_id": "q1", "market": "WETH-USDC"},
                 }
             }
@@ -42,6 +49,10 @@ def test_estado_reads_the_book_and_does_not_list_logs(tmp_path):
     assert body["ultimo_ciclo"] == "20261112T171500Z"
     assert body["ultimo_ciclo_en"] == "2026-11-12T17:15:00.000000Z"
     assert body["operaciones_cerradas"] == 3
+    assert body["pnl_realizado_usd"] == "-1.25"
+    assert body["pnl_dia_usd"] == "-1.25"
+    assert body["ultimos_fills"][0]["bot"] == "house"
+    assert body["ultimos_fills"][0]["reason"] == "cotizacion_llenada"
     assert body["broker"] == "simulado"
     assert body["posicion_abierta"] is None
     assert body["resting_order"]["client_order_id"] == "q1"

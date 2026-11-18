@@ -117,6 +117,8 @@ class BookState(BaseModel):
     closed_trades: int = 0
     started_at: str | None = None
     max_drawdown_usd: Decimal = Decimal("0")
+    # Los últimos fills, para /estado, sin releer la bitácora.
+    recent_fills: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class Proposal(BaseModel):

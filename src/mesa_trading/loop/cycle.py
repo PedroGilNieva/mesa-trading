@@ -447,6 +447,13 @@ def _cancel_resting(env, state, cycle_id: str, now: datetime, mode: str, reason:
     )
 
 
+def _remember_fill(state, **fields: str) -> None:
+    """Un fill en el libro, para /estado. No es una decisión de política."""
+    state.recent_fills.append(dict(fields))
+    if len(state.recent_fills) > 20:
+        state.recent_fills = state.recent_fills[-20:]
+
+
 def _open_filled(
     env,
     state,
@@ -472,10 +479,15 @@ def _open_filled(
         mode=mode,
         payload={
             "client_order_id": fill.client_order_id,
+            "market": market,
+            "action": action,
+            "side": "short" if action == "short" else "buy",
+            "notional_usd": str(notional_usd),
             "price": str(fill.price),
             "fee_usd": str(fill.fee_usd),
             "slippage_usd": str(fill.slippage_usd),
             "price_source": fill.price_source,
+            "threshold_version": threshold_version,
         },
         parts=(fill.client_order_id, "fill"),
     )
@@ -494,6 +506,20 @@ def _open_filled(
         cuenta_como_evidencia=cuenta_como_evidencia,
     )
     open_position(state, position, fill.fee_usd, fill.slippage_usd)
+    _remember_fill(
+        state,
+        bot=bot,
+        market=market,
+        action=action,
+        side=position.side,
+        price=str(fill.price),
+        price_source=fill.price_source,
+        notional_usd=str(notional_usd),
+        pnl_usd="",
+        reason="entrada" if action != "quote" else "cotizacion_llenada",
+        at=iso(fill.filled_at),
+        threshold_version=str(threshold_version),
+    )
     if fill.client_order_id not in state.seen_orders:
         state.seen_orders.append(fill.client_order_id)
     state.last_prices[market] = str(fill.price)
@@ -568,6 +594,20 @@ def _close(env, state, cycle_id, now, mode, reason, snapshot, book=None) -> int:
     pnl = close_position(state, fill.price, fill.fee_usd, fill.slippage_usd, fill.filled_at)
     state.seen_orders.append(order.client_order_id)
     state.last_prices[pos.market] = str(fill.price)
+    _remember_fill(
+        state,
+        bot=pos.bot,
+        market=pos.market,
+        action="close",
+        side=order.side,
+        price=str(fill.price),
+        price_source=fill.price_source,
+        notional_usd=str(order.notional_usd),
+        pnl_usd=str(pnl),
+        reason=reason,
+        at=iso(fill.filled_at),
+        threshold_version=str(pos.threshold_version),
+    )
     _emit(
         env,
         "OrderFilled",
@@ -575,7 +615,18 @@ def _close(env, state, cycle_id, now, mode, reason, snapshot, book=None) -> int:
         now,
         bot=pos.bot,
         mode=mode,
-        payload={"client_order_id": fill.client_order_id, "price": str(fill.price), "reason": reason, "price_source": fill.price_source},
+        payload={
+            "client_order_id": fill.client_order_id,
+            "market": pos.market,
+            "action": "close",
+            "side": order.side,
+            "notional_usd": str(order.notional_usd),
+            "price": str(fill.price),
+            "reason": reason,
+            "pnl_usd": str(pnl),
+            "price_source": fill.price_source,
+            "threshold_version": pos.threshold_version,
+        },
         parts=(order.client_order_id, "fill"),
     )
     _emit(
