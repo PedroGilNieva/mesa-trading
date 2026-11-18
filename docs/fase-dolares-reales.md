@@ -51,15 +51,18 @@ terminado y no sale la orden.
 ## Kill sin esperar un tick de decisión
 
 Objeto `book/kill` en el mismo bucket que `book/state.json`. Cualquier
-contenido no vacío lo prende. El proceso lo lee al empezar cada operación,
-antes de cotizar. No hace falta que el juez esté a mitad de una decisión:
-basta con que el proceso arranque. El latch queda en el libro hasta la
-medianoche de Ciudad de México. Borrar el objeto no reabre ese día.
+contenido no vacío lo prende, y solo cuando la fase real esté validada y
+encendida. Hoy esa fase no puede encenderse: la mesa de papel no lee el
+objeto para operar, no se aplana y no se frena. Un error al leerlo no tumba
+el tick.
 
-En simulado, ese camino aplana con `SimBroker` y una llave ficticia que
-no es un secreto. No llama a Secret Manager ni a un broker real. El flag
-`real_money.enabled` sigue imposible de encender, así que este proceso no
-firma con la wallet real.
+El latch, cuando la fase exista, queda en el libro hasta la medianoche de
+Ciudad de México. Borrar el objeto no reabre ese día. El rearme es
+explícito: al cambiar el día, y solo si el objeto ya no está, `kill_latched`
+vuelve a false. Si el objeto sigue, el latch sigue.
+
+El camino de aplanado usa `SimBroker` en las pruebas, con una llave ficticia
+que no es un secreto. No llama a Secret Manager ni a un broker real.
 
 ## Llaves
 

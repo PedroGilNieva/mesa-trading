@@ -1,7 +1,7 @@
 """Guardas de la fase con pocos dólares. No hay broker real ni lectura de secretos.
 
-El flag `enabled` no puede ser true. El tick simulado solo aplana si aparece
-`book/kill`. La wallet real no entra en este proceso.
+`enabled` no puede ser true, ni siquiera armado con model_construct. La mesa
+de papel no lee `book/kill` y no se aplana por él.
 """
 
 from __future__ import annotations
@@ -10,11 +10,15 @@ from datetime import datetime
 from decimal import ROUND_DOWN, Decimal
 from typing import Callable
 
+from pydantic import ValidationError
+
 from mesa_trading.book.store import close_position, equity_usd
 from mesa_trading.broker.base import Broker
 from mesa_trading.config import RealMoneyConfig
-from mesa_trading.models import Ack, BookState, Order, Position
+from mesa_trading.models import Ack, BookState, Fill, Order, Position, RestingOrder
 from mesa_trading.util import client_order_id, iso, sha256_text
+
+_ORDER_STATES = ("filled", "rejected", "sin_fill", "accepted", "pendiente")
 
 
 class SecretUnavailable(RuntimeError):
@@ -27,6 +31,43 @@ class FlattenFailed(RuntimeError):
 
 class BookConflict(RuntimeError):
     """La escritura condicionada no pasó. No se mandó la orden."""
+
+
+class VenueUnknown(RuntimeError):
+    """No se pudo leer el venue. No se da la posición por cerrada."""
+
+
+def phase_is_on(caps: RealMoneyConfig) -> bool:
+    """Solo un modelo validado y encendido. model_construct no cuenta."""
+    try:
+        checked = RealMoneyConfig.model_validate(caps.model_dump())
+    except (ValidationError, ValueError):
+        return False
+    return checked.enabled is True
+
+
+def sized_notional(
+    requested: Decimal,
+    *,
+    cash: Decimal,
+    caps: RealMoneyConfig,
+    fee_bps: Decimal,
+    slip_bps: Decimal,
+) -> Decimal:
+    """Con la fase apagada el tamaño no cambia. Encendida, aplica el tope."""
+    if not phase_is_on(caps):
+        return requested
+    return capped_notional(requested, cash=cash, caps=caps, fee_bps=fee_bps, slip_bps=slip_bps)
+
+
+def rearm_kill(book: BookState, *, requested: bool) -> bool:
+    """Después de la medianoche, y solo si el objeto kill ya no está."""
+    if not book.kill_latched or requested:
+        return False
+    book.kill_latched = False
+    if book.halt_rule == "kill_switch":
+        book.halt_rule = None
+    return True
 
 
 def phase_capital(desk_capital: Decimal, caps: RealMoneyConfig) -> Decimal:
@@ -77,27 +118,37 @@ def submit_once(
     book: BookState,
     persist: Callable[[], bool] | None = None,
 ) -> Ack:
-    """No envía si la llave falla. El mismo cloid no se vuelve a cruzar."""
+    """No envía si la llave falla. Un cloid lleno no se vuelve a cruzar."""
     require_key(loader)
     cloid = hyperliquid_cloid(order.client_order_id)
-    if cloid in book.sent_orders:
+    status = _order_state(broker, book, order.client_order_id)
+    if status == "filled":
+        _remember(book, cloid, "filled", order.client_order_id)
         return Ack(client_order_id=order.client_order_id, accepted=True, detail="idempotente")
-    book.sent_orders[cloid] = order.client_order_id
-    if len(book.sent_orders) > 50:
-        book.sent_orders = dict(list(book.sent_orders.items())[-50:])
+    if status in {"rejected", "sin_fill"}:
+        _remember(book, cloid, status, order.client_order_id)
+        return Ack(client_order_id=order.client_order_id, accepted=False, detail=status)
+    _remember(book, cloid, "pendiente", order.client_order_id)
     if persist is not None and not persist():
         book.sent_orders.pop(cloid, None)
         raise BookConflict("escritura condicionada rechazada")
-    return broker.submit(order)
+    ack = broker.submit(order)
+    _remember(book, cloid, _order_state(broker, book, order.client_order_id), order.client_order_id)
+    return ack
 
 
 def cancel_live(book: BookState, broker: Broker) -> bool:
-    """Borra la orden del libro solo después de que el venue confirme."""
+    """Si la orden se llenó al cancelar, se adopta. Si no, no se borra del libro."""
     resting = book.resting_order
     if resting is None:
         return True
-    if not broker.cancel(resting.client_order_id):
+    if broker.cancel(resting.client_order_id):
+        book.resting_order = None
+        return True
+    fills = [fill for fill in broker.fills() if fill.client_order_id == resting.client_order_id]
+    if not fills:
         return False
+    _adopt_fill(book, resting, fills[-1])
     book.resting_order = None
     return True
 
@@ -115,7 +166,13 @@ def flatten(
     if pos is None:
         return None
     _align_sim_venue(book, broker)
-    mark = _mark(book, pos.market, pos.entry_price)
+    mark = _usable_mark(book, pos.market)
+    if mark is None:
+        book.inflight_close = None
+        raise FlattenFailed("sin precio")
+    if book.inflight_close and _order_state(broker, book, book.inflight_close) != "filled":
+        # Rechazada o sin fill: el cloid viejo no se vuelve a mandar.
+        book.inflight_close = None
     if not book.inflight_close:
         book.flatten_nonce += 1
         book.inflight_close = client_order_id(f"{iso(now)}|{book.flatten_nonce}", pos.bot, pos.market, "close")
@@ -135,10 +192,10 @@ def flatten(
         reduce_only=True,
     )
     ack = submit_once(broker, order, loader, book, persist)
-    fills = [fill for fill in broker.fills() if fill.client_order_id == order.client_order_id]
-    if not fills or not ack.accepted:
+    fill = _fill_for(broker, order.client_order_id)
+    if fill is None or not ack.accepted:
+        book.inflight_close = None
         raise FlattenFailed("la orden de cierre no cruzó")
-    fill = fills[-1]
     pnl = close_position(book, fill.price, fill.fee_usd, fill.slippage_usd, fill.filled_at)
     book.inflight_close = None
     return pnl
@@ -203,19 +260,21 @@ def reconcile_startup(
     loader: Callable[[], str | None],
     persist: Callable[[], bool] | None = None,
 ) -> bool:
-    """La posición que manda es la del venue. El libro se pone a la par."""
-    venue = broker.positions()
-    if not venue and book.position is None and book.resting_order is None:
+    """La posición que manda es la del venue. Si no se puede leer, no se toca el libro."""
+    positions, orders = read_venue(broker)
+    if not positions and not orders and book.position is None and book.resting_order is None:
         return False
     book.halted_until = next_cdmx_midnight(now)
     book.halt_rule = "reconciliacion"
     require_key(loader)
+    for item in orders:
+        _cancel_venue_order(book, broker, item)
     if not cancel_live(book, broker):
         raise FlattenFailed("cancelacion no confirmada")
-    if venue:
-        _adopt_venue(book, venue[0], now)
+    for venue in positions:
+        _adopt_venue(book, venue, now)
         flatten(book, broker, now, loader=loader, reason="reconciliacion", persist=persist)
-    elif book.position is not None:
+    if book.position is not None and not positions:
         book.position = None
     return True
 
@@ -243,6 +302,25 @@ def _align_sim_venue(book: BookState, broker: Broker) -> None:
     seed(pos.market, pos.side, pos.qty, pos.entry_price)
 
 
+def _adopt_fill(book: BookState, resting: RestingOrder, fill: Fill) -> None:
+    if book.position is not None:
+        return
+    side = "short" if resting.side == "sell" or fill.side == "sell" else "long"
+    book.position = Position(
+        market=resting.market,
+        bot=resting.bot,
+        side=side,
+        qty=fill.qty,
+        entry_price=fill.price,
+        notional_usd=fill.qty * fill.price,
+        opened_at=fill.filled_at,
+        fees_usd=fill.fee_usd,
+        slippage_usd=fill.slippage_usd,
+        kind=resting.kind,
+    )
+    book.last_prices[resting.market] = str(fill.price)
+
+
 def _adopt_venue(book: BookState, venue: dict, now: datetime) -> None:
     market = str(venue["market"])
     side = venue["side"]
@@ -264,8 +342,114 @@ def _adopt_venue(book: BookState, venue: dict, now: datetime) -> None:
     )
 
 
-def _mark(book: BookState, market: str, fallback: Decimal) -> Decimal:
+def read_venue(broker: Broker) -> tuple[list[dict], list[dict]]:
+    try:
+        positions = broker.positions()
+    except Exception as exc:
+        raise VenueUnknown("positions") from exc
+    if positions is None:
+        raise VenueUnknown("positions")
+    reader = getattr(broker, "open_orders", None)
+    if reader is None:
+        return list(positions), []
+    try:
+        orders = reader()
+    except Exception as exc:
+        raise VenueUnknown("ordenes") from exc
+    if orders is None:
+        raise VenueUnknown("ordenes")
+    return list(positions), list(orders)
+
+
+def _usable_mark(book: BookState, market: str) -> Decimal | None:
     raw = book.last_prices.get(market)
-    if not raw:
-        return fallback
-    return Decimal(raw)
+    if raw:
+        price = Decimal(raw)
+        if price > 0:
+            return price
+    if book.position is not None and book.position.market == market and book.position.entry_price > 0:
+        return book.position.entry_price
+    return None
+
+
+def _order_state(broker: Broker, book: BookState, client_order_id: str) -> str:
+    ask = getattr(broker, "order_status", None)
+    if ask is not None:
+        try:
+            status = ask(client_order_id)
+        except Exception:
+            status = "unknown"
+        if status in _ORDER_STATES:
+            return status
+    if _fill_for(broker, client_order_id) is not None:
+        return "filled"
+    stored, _client = _split(book.sent_orders.get(hyperliquid_cloid(client_order_id), ""))
+    return stored or "unknown"
+
+
+def _split(value: str) -> tuple[str, str]:
+    if ":" in value:
+        status, client = value.split(":", 1)
+        if status in _ORDER_STATES:
+            return status, client
+    if value:
+        return "accepted", value
+    return "", ""
+
+
+def _remember(book: BookState, cloid: str, status: str, client_order_id: str) -> None:
+    book.sent_orders[cloid] = f"{status}:{client_order_id}"
+    if len(book.sent_orders) <= 50:
+        return
+    inflight = hyperliquid_cloid(book.inflight_close) if book.inflight_close else ""
+    kept: dict[str, str] = {}
+    rest: list[tuple[str, str]] = []
+    for key, value in book.sent_orders.items():
+        state, _client = _split(value)
+        if key == inflight or state == "filled":
+            kept[key] = value
+        else:
+            rest.append((key, value))
+    room = 50 - len(kept)
+    if room > 0:
+        kept.update(dict(rest[-room:]))
+    elif len(kept) > 50:
+        filled = list(kept.items())[-50:]
+        kept = dict(filled)
+    book.sent_orders = kept
+
+
+def _fill_for(broker: Broker, client_order_id: str) -> Fill | None:
+    found = [fill for fill in broker.fills() if fill.client_order_id == client_order_id]
+    return found[-1] if found else None
+
+
+def _cancel_venue_order(book: BookState, broker: Broker, item: dict) -> None:
+    client_order_id = str(item.get("client_order_id") or "")
+    if not client_order_id:
+        return
+    if broker.cancel(client_order_id):
+        return
+    fill = _fill_for(broker, client_order_id)
+    if fill is None:
+        return
+    resting = RestingOrder(
+        client_order_id=client_order_id,
+        cycle_id="venue",
+        bot=str(item.get("bot") or "gambler"),
+        market=str(item.get("market") or fill.market),
+        side=item.get("side") or fill.side,
+        action="close" if item.get("side") == "sell" else "long",
+        qty=fill.qty,
+        notional_usd=Decimal(str(item.get("notional_usd") or fill.qty * fill.price)),
+        limit_price=fill.price,
+        decision_time=fill.filled_at,
+        expires_at=fill.filled_at,
+        kind=item.get("kind") or "perp",
+    )
+    _adopt_fill(book, resting, fill)
+
+
+def _mark(book: BookState, market: str, fallback: Decimal) -> Decimal:
+    price = _usable_mark(book, market)
+    return fallback if price is None else price

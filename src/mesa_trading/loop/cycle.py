@@ -194,7 +194,7 @@ def _consider(env, state, bot, market, mode, cycle_id, now, funnel, managing, ra
             ),
             cheap(
                 snapshot,
-                notional_usd=env.config.capital_usd * env.config.risk.max_position_pct,
+                notional_usd=_sized_for_filter(env, state, market, snapshot),
                 min_fee_usd=env.fees[env.config.markets[market].fee_schedule].min_fee_usd,
                 max_vol=filters.max_vol,
                 max_fee_fraction=filters.max_fee_fraction,
@@ -898,6 +898,7 @@ def _roll_day(env, state, cycle_id, now) -> bool:
     state.day_realized_pnl_usd = Decimal("0")
     state.halted_until = None
     state.halt_rule = None
+    _rearm_after_midnight(env, state)
     if was:
         _emit(env, "DeskResumed", cycle_id, now, payload={"dia": day})
     return was
@@ -1061,22 +1062,64 @@ class _Writer:
         return True
 
 
-def _latch_kill(env, state, now, writer: _Writer) -> None:
-    """book/kill se lee al empezar. No depende de que el juez haya corrido."""
-    if not env.book.kill_requested() and not state.kill_latched:
-        return
-    from mesa_trading.real_money import BookConflict, FlattenFailed, SecretUnavailable, kill_switch
+def _sized_for_filter(env, state, market: str, snapshot: dict):
+    from mesa_trading.real_money import sized_notional
 
+    requested = env.config.capital_usd * env.config.risk.max_position_pct
+    schedule = env.fees[env.config.markets[market].fee_schedule]
+    return sized_notional(
+        requested,
+        cash=state.cash_usd,
+        caps=env.config.real_money,
+        fee_bps=schedule.taker_bps,
+        slip_bps=Decimal(str(snapshot.get("spread_bps") or "0")),
+    )
+
+
+def _rearm_after_midnight(env, state) -> None:
+    from mesa_trading.real_money import rearm_kill
+
+    try:
+        requested = bool(env.book.kill_requested())
+    except Exception:
+        return
+    rearm_kill(state, requested=requested)
+
+
+def _latch_kill(env, state, now, writer: _Writer) -> None:
+    """book/kill solo actúa con la fase real. Apagada, la mesa de papel no se entera."""
+    from mesa_trading.real_money import BookConflict, FlattenFailed, SecretUnavailable, kill_switch, phase_is_on
+
+    if not phase_is_on(env.config.real_money):
+        try:
+            env.book.kill_requested()
+        except Exception:
+            return
+        return
+    try:
+        requested = bool(env.book.kill_requested())
+    except Exception:
+        return
+    if not requested and not state.kill_latched:
+        return
     state.halted_until = _next_midnight(now)
     state.halt_rule = "kill_switch"
     state.kill_latched = True
     if state.position is None and state.resting_order is None:
         return
     market = state.position.market if state.position is not None else state.resting_order.market
-    mark = _last_mark(state) or Decimal("1")
+    mark = _last_mark(state)
+    if state.resting_order is not None and (mark is None or mark <= 0):
+        raw = state.last_prices.get(state.resting_order.market)
+        mark = Decimal(raw) if raw else None
+    if mark is None or mark <= 0:
+        return
     spec = env.config.markets[market]
     connector = env.connector_for(market)
-    raw_book = connector.order_book(spec.product or market) or connector.order_book(market)
+    try:
+        raw_book = connector.order_book(spec.product or market) or connector.order_book(market)
+    except Exception:
+        return
     broker = _sim(
         env,
         market,
@@ -1103,6 +1146,13 @@ def _finish(env, state, generation, cycle_id, now, result, funnel) -> bool:
     # El libro queda escrito antes de CycleFinished. Un 412 no se ignora:
     # sin el libro no hay ciclo terminado, y el siguiente tick lo reintenta.
     if not env.book.write(state, generation):
+        _emit(
+            env,
+            "BookWriteRejected",
+            cycle_id,
+            now,
+            payload={"generation": generation},
+        )
         return False
     _emit(
         env,

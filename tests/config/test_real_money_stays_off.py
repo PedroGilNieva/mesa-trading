@@ -5,7 +5,8 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from mesa_trading.config import load_desk, repo_root
+from mesa_trading.config import RealMoneyConfig, load_desk, repo_root
+from mesa_trading.real_money import phase_is_on
 
 
 def test_real_money_is_off_with_the_hard_caps():
@@ -31,3 +32,9 @@ def test_real_money_config_is_frozen():
         config.real_money.enabled = True
     with pytest.raises(ValidationError):
         config.capital_usd = Decimal("1")
+    config.bots["gambler"].mode = "shadow"
+    config.bots["gambler"].mode = "simulated"
+    built = RealMoneyConfig.model_construct(enabled=True)
+    assert built.enabled is True
+    assert phase_is_on(built) is False
+    assert phase_is_on(config.real_money) is False

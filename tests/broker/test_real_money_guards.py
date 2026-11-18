@@ -17,13 +17,18 @@ from mesa_trading.real_money import (
     capped_notional,
     day_pnl,
     enforce_daily_loss,
+    flatten,
     hyperliquid_cloid,
     kill_switch,
     next_cdmx_midnight,
     phase_capital,
     protect,
+    rearm_kill,
     reconcile_startup,
     submit_once,
+    VenueUnknown,
+    _remember,
+    _usable_mark,
 )
 from mesa_trading.models import Order
 
@@ -156,7 +161,7 @@ def test_retry_uses_the_same_hyperliquid_cloid():
     assert broker.submits == 1
     assert len(broker.fills()) == 1
     cloid = hyperliquid_cloid("orden-1")
-    assert book.sent_orders[cloid] == "orden-1"
+    assert book.sent_orders[cloid] == "filled:orden-1"
     assert cloid.startswith("0x")
     assert len(cloid) == 34
 
@@ -330,6 +335,180 @@ def test_reduce_only_does_not_open_a_position():
     assert ack.accepted is False
     assert ack.detail == "reduce_only_sin_posicion"
     assert broker.positions() == []
+
+
+def test_failed_flatten_retries_with_a_new_nonce():
+    broker = _broker()
+    broker.bid = None
+    broker.ask = None
+    book = fresh_book(Decimal("100"), NOW)
+    book.position = _position()
+    book.last_prices["BTC-PERP"] = "100"
+    with pytest.raises(FlattenFailed):
+        flatten(book, broker, NOW, loader=_key, reason="kill_switch")
+    assert book.position is not None
+    assert book.inflight_close is None
+    assert len(broker._orders) == 1
+    broker.bid = Decimal("99")
+    broker.ask = Decimal("101")
+    flatten(book, broker, NOW, loader=_key, reason="kill_switch")
+    assert book.position is None
+    assert len(broker.fills()) == 1
+    assert len(broker._orders) == 2
+    assert broker.fills()[0].client_order_id == list(broker._orders)[-1]
+
+
+def test_partial_reduce_only_keeps_the_remainder():
+    broker = _broker()
+    broker.seed_position("BTC-PERP", "long", Decimal("1"), Decimal("100"))
+    ack = broker.submit(
+        Order(
+            client_order_id="parcial",
+            cycle_id="1",
+            bot="gambler",
+            market="BTC-PERP",
+            side="sell",
+            action="close",
+            order_type="market",
+            qty=Decimal("0.4"),
+            notional_usd=Decimal("40"),
+            decision_time=NOW,
+            kind="perp",
+            reduce_only=True,
+        )
+    )
+    assert ack.accepted is True
+    assert broker.positions()[0]["qty"] == Decimal("0.6")
+    assert broker.fills()[0].qty == Decimal("0.4")
+
+
+def test_filled_cloid_survives_the_cap_of_fifty():
+    book = fresh_book(Decimal("100"), NOW)
+    book.inflight_close = "vivo"
+    for index in range(60):
+        _remember(book, f"0x{index:032x}", "rejected", f"r{index}")
+    _remember(book, hyperliquid_cloid("vivo"), "filled", "vivo")
+    assert len(book.sent_orders) <= 50
+    assert book.sent_orders[hyperliquid_cloid("vivo")] == "filled:vivo"
+
+
+def test_cancel_that_fills_is_adopted_and_flattened():
+    broker = _broker()
+    opened = broker.submit(
+        Order(
+            client_order_id="se-lleno",
+            cycle_id="1",
+            bot="house",
+            market="BTC-PERP",
+            side="buy",
+            action="long",
+            order_type="market",
+            qty=Decimal("0.2"),
+            notional_usd=Decimal("20"),
+            decision_time=NOW,
+            kind="perp",
+        )
+    )
+    assert opened.detail == "filled"
+    book = fresh_book(Decimal("100"), NOW)
+    book.last_prices["BTC-PERP"] = "100"
+    book.resting_order = RestingOrder(
+        client_order_id="se-lleno",
+        cycle_id="1",
+        bot="house",
+        market="BTC-PERP",
+        side="buy",
+        action="long",
+        qty=Decimal("0.2"),
+        notional_usd=Decimal("20"),
+        limit_price=Decimal("100"),
+        decision_time=NOW,
+        expires_at=NOW,
+        kind="perp",
+    )
+    kill_switch(book, broker, NOW, loader=_key)
+    assert book.resting_order is None
+    assert book.position is None
+    assert book.halt_rule == "kill_switch"
+
+
+def test_reconcile_cancels_open_orders_and_all_positions():
+    broker = _broker()
+    broker.submit(
+        Order(
+            client_order_id="limite-viva",
+            cycle_id="1",
+            bot="house",
+            market="BTC-PERP",
+            side="buy",
+            action="quote",
+            order_type="limit",
+            qty=Decimal("0.1"),
+            notional_usd=Decimal("10"),
+            limit_price=Decimal("50"),
+            decision_time=NOW,
+            kind="perp",
+        )
+    )
+    assert broker.open_orders()
+    book = fresh_book(Decimal("100"), NOW)
+    assert reconcile_startup(book, broker, NOW, loader=_key) is True
+    assert broker.open_orders() == []
+
+
+def test_reconcile_fails_closed_when_the_venue_cannot_be_read():
+    book = fresh_book(Decimal("100"), NOW)
+    book.position = _position()
+
+    class Broken:
+        def positions(self):
+            raise TimeoutError("venue")
+
+        def open_orders(self):
+            return []
+
+        def cancel(self, _client_order_id):
+            return True
+
+        def fills(self, since=None):
+            return []
+
+    with pytest.raises(VenueUnknown):
+        reconcile_startup(book, Broken(), NOW, loader=_key)
+    assert book.position is not None
+
+    class EmptyByError:
+        def positions(self):
+            return None
+
+        def open_orders(self):
+            return []
+
+        def cancel(self, _client_order_id):
+            return True
+
+        def fills(self, since=None):
+            return []
+
+    with pytest.raises(VenueUnknown):
+        reconcile_startup(book, EmptyByError(), NOW, loader=_key)
+    assert book.position is not None
+
+
+def test_rearm_waits_until_the_kill_object_is_gone():
+    book = fresh_book(Decimal("100"), NOW)
+    book.kill_latched = True
+    book.halt_rule = "kill_switch"
+    assert rearm_kill(book, requested=True) is False
+    assert book.kill_latched is True
+    assert rearm_kill(book, requested=False) is True
+    assert book.kill_latched is False
+    assert book.halt_rule is None
+
+
+def test_missing_price_is_not_one_dollar():
+    book = fresh_book(Decimal("100"), NOW)
+    assert _usable_mark(book, "BTC-PERP") is None
 
 
 def test_protect_does_nothing_while_the_flag_is_off():
