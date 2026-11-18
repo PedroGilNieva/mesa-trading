@@ -133,7 +133,7 @@ class RealMoneyConfig(BaseModel):
 
 
 class DeskConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_assignment=True)
 
     cadence_minutes: int
     snapshot_max_age_s: int

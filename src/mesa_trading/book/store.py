@@ -69,6 +69,9 @@ class BookStore:
     def unlock(self, owner: str) -> None:
         raise NotImplementedError
 
+    def kill_requested(self) -> bool:
+        return False
+
 
 class FileBookStore(BookStore):
     def __init__(self, root: Path, capital: Decimal = Decimal("1000"), now: datetime | None = None) -> None:
@@ -111,6 +114,13 @@ class FileBookStore(BookStore):
             current = self._read_lock()
             if current and current["owner"] == owner:
                 self._lock_path.unlink(missing_ok=True)
+
+    def kill_requested(self) -> bool:
+        # book/kill junto a state.json. Se lee al empezar cada operación.
+        path = self.root / "kill"
+        if not path.is_file():
+            return False
+        return bool(path.read_text(encoding="utf-8").strip())
 
     def _read_lock(self) -> dict | None:
         if not self._lock_path.exists():

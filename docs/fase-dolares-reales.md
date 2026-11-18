@@ -34,16 +34,32 @@ El nocional que se mandaría ya descuenta comisión y slippage. Tiene que
 caber en 25 USD, en los 100 USD de capital y en el saldo. Si no cabe, se
 recorta; no se manda un tamaño que el costo empuje por encima del tope.
 
-El halt diario del simulado (5% del capital) no cambia. La fase real suma
-un tope absoluto de 10 USD de PnL realizado en el día de Ciudad de México.
-Al cruzarlo, o si Pedro acciona el kill switch, se cancela la orden viva,
-se aplana la posición con una orden de mercado y no se reabre hasta la
-medianoche de Ciudad de México. Si el proceso arranca con una posición o
-una orden viva —se cayó a medias—, hace lo mismo antes de operar.
+El halt del 5% del simulado no cambia. La fase suma un tope de 10 USD
+que junta el realizado del día y el no realizado de la posición abierta.
+Al cruzarlo se cancela la orden viva —solo si el venue confirma— y se
+aplana con `reduce_only`. No se reabre hasta la medianoche de Ciudad de
+México, la misma que calcula el ciclo. Cada aplanado lleva cloid propio
+(fecha y nonce). Repetir el mismo intento no vuelve a cruzar; un segundo
+aplanado no cierra con el fill del primero.
 
-Eso está en `real_money.py` y se prueba contra `SimBroker`. El tick de
-staging no lo llama. El flag no puede encenderse, así que el servicio
-simulado no aplana ni usa estos topes.
+Si al arrancar el venue tiene posición, el libro se pone a la par y se
+aplana. Si el venue ya está plano, no se manda una orden ni se inventa un
+fill. El cloid y el latch del kill se guardan en el libro, con la misma
+escritura condicionada: si GCS responde 412, no se publica el ciclo como
+terminado y no sale la orden.
+
+## Kill sin esperar un tick de decisión
+
+Objeto `book/kill` en el mismo bucket que `book/state.json`. Cualquier
+contenido no vacío lo prende. El proceso lo lee al empezar cada operación,
+antes de cotizar. No hace falta que el juez esté a mitad de una decisión:
+basta con que el proceso arranque. El latch queda en el libro hasta la
+medianoche de Ciudad de México. Borrar el objeto no reabre ese día.
+
+En simulado, ese camino aplana con `SimBroker` y una llave ficticia que
+no es un secreto. No llama a Secret Manager ni a un broker real. El flag
+`real_money.enabled` sigue imposible de encender, así que este proceso no
+firma con la wallet real.
 
 ## Llaves
 

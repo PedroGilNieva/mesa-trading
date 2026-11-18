@@ -88,10 +88,12 @@ def _guard_spy(env: DeskEnv) -> None:
 
 def _run_locked(env: DeskEnv, cycle_id: str, now: datetime) -> dict:
     state, generation = env.book.read()
+    writer = _Writer(env.book, generation)
     if state.started_at is None:
         state.started_at = iso(now)
     _emit(env, "CycleStarted", cycle_id, now, payload={"capital_usd": str(env.config.capital_usd)})
     resumed = _roll_day(env, state, cycle_id, now)
+    _latch_kill(env, state, now, writer)
     funnel = _empty_funnel()
     if state.halted_until is not None and now < as_utc(state.halted_until):
         _emit(
@@ -101,8 +103,8 @@ def _run_locked(env: DeskEnv, cycle_id: str, now: datetime) -> dict:
             now,
             payload={"hasta": iso(state.halted_until), "regla": state.halt_rule or "perdida_diaria"},
         )
-        _finish(env, state, generation, cycle_id, now, "halted", funnel)
-        return {"halted": True, "orders": 0, "resumed": resumed}
+        wrote = _finish(env, state, writer.generation, cycle_id, now, "halted", funnel)
+        return {"halted": True, "orders": 0, "resumed": resumed, "book_rejected": not wrote}
 
     _resolve_pending(env, state, cycle_id, now)
     _resolve_resting(env, state, cycle_id, now)
@@ -112,8 +114,8 @@ def _run_locked(env: DeskEnv, cycle_id: str, now: datetime) -> dict:
     elif state.position is not None:
         orders += _manage(env, state, cycle_id, now, funnel)
     _maybe_halt(env, state, cycle_id, now)
-    _finish(env, state, generation, cycle_id, now, "ok", funnel)
-    return {"orders": orders, "halted": state.halted_until is not None}
+    wrote = _finish(env, state, writer.generation, cycle_id, now, "ok", funnel)
+    return {"orders": orders, "halted": state.halted_until is not None, "book_rejected": not wrote}
 
 
 def _empty_funnel() -> dict:
@@ -1047,13 +1049,61 @@ def _next_midnight(now: datetime) -> datetime:
     return nxt.astimezone(timezone.utc)
 
 
-def _finish(env, state, generation, cycle_id, now, result, funnel) -> None:
+class _Writer:
+    def __init__(self, store, generation: int) -> None:
+        self.store = store
+        self.generation = generation
+
+    def persist(self, state) -> bool:
+        if not self.store.write(state, self.generation):
+            return False
+        self.generation += 1
+        return True
+
+
+def _latch_kill(env, state, now, writer: _Writer) -> None:
+    """book/kill se lee al empezar. No depende de que el juez haya corrido."""
+    if not env.book.kill_requested() and not state.kill_latched:
+        return
+    from mesa_trading.real_money import BookConflict, FlattenFailed, SecretUnavailable, kill_switch
+
+    state.halted_until = _next_midnight(now)
+    state.halt_rule = "kill_switch"
+    state.kill_latched = True
+    if state.position is None and state.resting_order is None:
+        return
+    market = state.position.market if state.position is not None else state.resting_order.market
+    mark = _last_mark(state) or Decimal("1")
+    spec = env.config.markets[market]
+    connector = env.connector_for(market)
+    raw_book = connector.order_book(spec.product or market) or connector.order_book(market)
+    broker = _sim(
+        env,
+        market,
+        {"last_close": str(mark), "spread_bps": "2", "liquidity_usd": "1000000"},
+        mark,
+        book=raw_book,
+        decision=now,
+    )
+    try:
+        kill_switch(
+            state,
+            broker,
+            now,
+            loader=lambda: "simulado",
+            persist=lambda: writer.persist(state),
+        )
+    except (BookConflict, FlattenFailed, SecretUnavailable):
+        return
+
+
+def _finish(env, state, generation, cycle_id, now, result, funnel) -> bool:
     state.last_cycle_id = cycle_id
     state.last_cycle_at = iso(now)
-    # El libro queda escrito antes de CycleFinished. Si el log se escribiera
-    # primero y el libro fallara, el siguiente tick vería el ciclo hecho y
-    # se saltaría la posición.
-    env.book.write(state, generation)
+    # El libro queda escrito antes de CycleFinished. Un 412 no se ignora:
+    # sin el libro no hay ciclo terminado, y el siguiente tick lo reintenta.
+    if not env.book.write(state, generation):
+        return False
     _emit(
         env,
         "CycleFinished",
@@ -1072,6 +1122,7 @@ def _finish(env, state, generation, cycle_id, now, result, funnel) -> None:
             "funnel_rejected": funnel["rechazados_por_paso"],
         },
     )
+    return True
 
 
 def _bump(counter: dict, key: str) -> None:

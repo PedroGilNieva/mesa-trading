@@ -29,3 +29,5 @@ def test_real_money_config_is_frozen():
     config = load_desk(repo_root() / "config" / "desk.yaml")
     with pytest.raises(ValidationError):
         config.real_money.enabled = True
+    with pytest.raises(ValidationError):
+        config.capital_usd = Decimal("1")

@@ -58,14 +58,23 @@ class SimBroker(Broker):
         self._orders[order.client_order_id] = order
         if order.client_order_id in self._cancelled:
             return Ack(client_order_id=order.client_order_id, accepted=False, detail="cancelada")
+        if order.reduce_only and not self._reduces(order):
+            return Ack(client_order_id=order.client_order_id, accepted=False, detail="reduce_only_sin_posicion")
         fill = self._try_fill(order)
         if fill is None:
             return Ack(client_order_id=order.client_order_id, accepted=True, detail="ack_sin_fill")
         self._apply_fill(fill, order)
         return Ack(client_order_id=order.client_order_id, accepted=True, detail="filled")
 
-    def cancel(self, client_order_id: str) -> None:
+    def cancel(self, client_order_id: str) -> bool:
+        if any(fill.client_order_id == client_order_id for fill in self._fills):
+            return False
         self._cancelled.add(client_order_id)
+        return True
+
+    def seed_position(self, market: str, side: str, qty: Decimal, entry: Decimal) -> None:
+        """La posición que el libro de papel ya tiene, vista como venue simulado."""
+        self._positions[market] = {"market": market, "qty": qty, "side": side, "entry": str(entry)}
 
     def fills(self, since: datetime | None = None) -> list[Fill]:
         if since is None:
@@ -144,16 +153,32 @@ class SimBroker(Broker):
             reason=order.reason,
         )
 
+    def _reduces(self, order: Order) -> bool:
+        pos = self._positions.get(order.market)
+        if not pos:
+            return False
+        if order.side == "sell" and pos.get("side") == "long":
+            return True
+        return order.side == "buy" and pos.get("side") == "short"
+
     def _apply_fill(self, fill: Fill, order: Order) -> None:
         self._fills.append(fill)
         cost = fill.fee_usd + fill.slippage_usd + fill.gas_usd
         signed = fill.qty * fill.price
+        if order.reduce_only or (fill.side == "sell" and order.action == "close"):
+            if fill.side == "buy":
+                self.cash_usd -= signed + cost
+            else:
+                self.cash_usd += signed - cost
+            self._positions.pop(order.market, None)
+            return
         if fill.side == "buy":
             self.cash_usd -= signed + cost
             self._positions[order.market] = {
                 "market": order.market,
                 "qty": fill.qty,
                 "side": "long" if order.action != "short" else "short",
+                "entry": str(fill.price),
             }
         else:
             self.cash_usd += signed - cost

@@ -11,9 +11,11 @@ from mesa_trading.broker.sim import SimBroker
 from mesa_trading.config import RealMoneyConfig
 from mesa_trading.models import Position, RestingOrder
 from mesa_trading.real_money import (
+    BookConflict,
     FlattenFailed,
     SecretUnavailable,
     capped_notional,
+    day_pnl,
     enforce_daily_loss,
     hyperliquid_cloid,
     kill_switch,
@@ -92,8 +94,11 @@ class Counting:
         self.submits += 1
         return self.inner.submit(order)
 
-    def cancel(self, client_order_id: str) -> None:
-        self.inner.cancel(client_order_id)
+    def cancel(self, client_order_id: str) -> bool:
+        return self.inner.cancel(client_order_id)
+
+    def seed_position(self, market: str, side: str, qty: Decimal, entry: Decimal) -> None:
+        self.inner.seed_position(market, side, qty, entry)
 
     def fills(self, since=None):
         return self.inner.fills(since)
@@ -144,15 +149,16 @@ def test_retry_uses_the_same_hyperliquid_cloid():
         decision_time=NOW,
         kind="perp",
     )
-    sent: dict = {}
-    first = submit_once(broker, order, _key, sent)
-    second = submit_once(broker, order, _key, sent)
+    book = fresh_book(Decimal("100"), NOW)
+    first = submit_once(broker, order, _key, book)
+    second = submit_once(broker, order, _key, book)
     assert first.client_order_id == second.client_order_id
     assert broker.submits == 1
     assert len(broker.fills()) == 1
-    assert hyperliquid_cloid("orden-1") in sent
-    assert hyperliquid_cloid("orden-1").startswith("0x")
-    assert len(hyperliquid_cloid("orden-1")) == 34
+    cloid = hyperliquid_cloid("orden-1")
+    assert book.sent_orders[cloid] == "orden-1"
+    assert cloid.startswith("0x")
+    assert len(cloid) == 34
 
 
 def test_secret_failure_does_not_send():
@@ -163,11 +169,12 @@ def test_secret_failure_does_not_send():
         raise TimeoutError("secret manager")
 
     with pytest.raises(SecretUnavailable):
-        kill_switch(book, broker, NOW, loader=broken, sent={})
+        kill_switch(book, broker, NOW, loader=broken)
     assert broker.submits == 0
     assert book.position is not None
     assert book.resting_order is not None
-    assert book.halt_rule is None
+    assert book.halt_rule == "kill_switch"
+    assert book.halted_until == datetime(2026, 11, 18, 6, 0, tzinfo=timezone.utc)
 
     def empty():
         return None
@@ -175,15 +182,14 @@ def test_secret_failure_does_not_send():
     crashed = fresh_book(Decimal("100"), NOW)
     crashed.position = _position()
     with pytest.raises(SecretUnavailable):
-        reconcile_startup(crashed, broker, NOW, loader=empty, sent={})
+        reconcile_startup(crashed, broker, NOW, loader=empty)
     assert crashed.position is not None
 
 
 def test_kill_switch_cancels_and_flattens_until_cdmx_midnight():
     broker = Counting(_broker())
     book = _book()
-    sent: dict = {}
-    kill_switch(book, broker, NOW, loader=_key, sent=sent)
+    kill_switch(book, broker, NOW, loader=_key)
     assert book.position is None
     assert book.resting_order is None
     assert book.halt_rule == "kill_switch"
@@ -191,40 +197,48 @@ def test_kill_switch_cancels_and_flattens_until_cdmx_midnight():
     assert book.halted_until == datetime(2026, 11, 18, 6, 0, tzinfo=timezone.utc)
     assert "resting-1" in broker.inner._cancelled
     fills = len(broker.fills())
-    kill_switch(book, broker, NOW, loader=_key, sent=sent)
+    kill_switch(book, broker, NOW, loader=_key)
     assert len(broker.fills()) == fills
     assert broker.submits == 1
 
 
-def test_daily_loss_of_ten_dollars_flattens_and_a_smaller_loss_does_not():
+def test_daily_loss_counts_unrealized_and_a_smaller_loss_does_not():
     caps = RealMoneyConfig()
-    sent: dict = {}
     calm = _book()
-    calm.day_realized_pnl_usd = Decimal("-9.99")
+    calm.cash_usd = Decimal("70.01")
     broker = Counting(_broker())
-    assert enforce_daily_loss(calm, broker, NOW, caps, loader=_key, sent=sent) is False
+    assert day_pnl(calm) == Decimal("-9.99")
+    assert enforce_daily_loss(calm, broker, NOW, caps, loader=_key) is False
     assert calm.position is not None
     assert broker.submits == 0
 
-    hit = _book()
-    assert enforce_daily_loss(hit, Counting(_broker()), NOW, caps, loader=_key, sent={}) is True
-    assert hit.position is None
-    assert hit.resting_order is None
-    assert hit.halt_rule == "perdida_diaria_real"
-    assert hit.halted_until == datetime(2026, 11, 18, 6, 0, tzinfo=timezone.utc)
+    marked = _book()
+    marked.day_realized_pnl_usd = Decimal("0")
+    marked.cash_usd = Decimal("80")
+    marked.last_prices["BTC-PERP"] = "50"
+    assert day_pnl(marked) == Decimal("-10")
+    assert enforce_daily_loss(marked, Counting(_broker()), NOW, caps, loader=_key) is True
+    assert marked.position is None
+    assert marked.halt_rule == "perdida_diaria_real"
 
 
-def test_startup_flattens_a_position_left_by_a_crash():
+def test_startup_follows_the_venue_position():
     book = fresh_book(Decimal("100"), NOW)
     book.position = _position()
     book.last_prices["BTC-PERP"] = "100"
-    broker = Counting(_broker())
-    assert reconcile_startup(book, broker, NOW, loader=_key, sent={}) is True
+    empty = Counting(_broker())
+    assert reconcile_startup(book, empty, NOW, loader=_key) is True
     assert book.position is None
-    assert book.halt_rule == "reconciliacion"
-    assert broker.submits == 1
-    idle = fresh_book(Decimal("100"), NOW)
-    assert reconcile_startup(idle, broker, NOW, loader=_key, sent={}) is False
+    assert empty.submits == 0
+
+    venue = Counting(_broker())
+    venue.seed_position("BTC-PERP", "long", Decimal("0.2"), Decimal("100"))
+    bare = fresh_book(Decimal("100"), NOW)
+    bare.last_prices["BTC-PERP"] = "100"
+    assert reconcile_startup(bare, venue, NOW, loader=_key) is True
+    assert bare.position is None
+    assert venue.submits == 1
+    assert venue.positions() == []
 
 
 def test_flatten_without_a_fill_leaves_the_position():
@@ -232,8 +246,90 @@ def test_flatten_without_a_fill_leaves_the_position():
     book.position = _position()
     broker = SimBroker(bid=None, ask=None, last_prices={})
     with pytest.raises(FlattenFailed):
-        kill_switch(book, broker, NOW, loader=_key, sent={})
+        kill_switch(book, broker, NOW, loader=_key)
     assert book.position is not None
+
+
+def test_second_flatten_uses_a_new_cloid_and_does_not_reuse_the_old_fill():
+    broker = Counting(
+        SimBroker(
+            fee_schedule=FeeSchedule(taker_bps=Decimal("10"), min_fee_usd=Decimal("0")),
+            spread_bps=Decimal("8"),
+            extra_bps=Decimal("2"),
+            liquidity_usd=Decimal("100000"),
+            cash_usd=Decimal("100"),
+            last_prices={"BTC-PERP": Decimal("100")},
+            bid=Decimal("99"),
+            ask=Decimal("101"),
+        )
+    )
+    book = fresh_book(Decimal("100"), NOW)
+    book.position = _position()
+    book.last_prices["BTC-PERP"] = "100"
+    from mesa_trading.real_money import flatten
+
+    first = flatten(book, broker, NOW, loader=_key, reason="kill_switch")
+    first_id = broker.fills()[0].client_order_id
+    assert first is not None
+    assert book.position is None
+    book.position = _position()
+    book.last_prices["BTC-PERP"] = "90"
+    broker.inner.bid = Decimal("89")
+    broker.inner.ask = Decimal("91")
+    second = flatten(book, broker, NOW, loader=_key, reason="kill_switch")
+    assert book.position is None
+    assert len(broker.fills()) == 2
+    assert broker.fills()[1].client_order_id != first_id
+    assert hyperliquid_cloid(broker.fills()[0].client_order_id) != hyperliquid_cloid(broker.fills()[1].client_order_id)
+    assert second != first
+    assert broker.fills()[1].fee_usd > 0
+    assert broker.fills()[1].slippage_usd > 0
+
+
+def test_cancel_must_be_confirmed_before_dropping_the_order():
+    book = _book()
+    broker = Counting(_broker())
+    broker.cancel = lambda _cid: False  # type: ignore[method-assign]
+    with pytest.raises(FlattenFailed):
+        kill_switch(book, broker, NOW, loader=_key)
+    assert book.resting_order is not None
+    assert book.halt_rule == "kill_switch"
+    assert broker.submits == 0
+
+
+def test_rejected_book_write_does_not_send():
+    book = _book()
+    broker = Counting(_broker())
+    with pytest.raises(BookConflict):
+        kill_switch(book, broker, NOW, loader=_key, persist=lambda: False)
+    assert broker.submits == 0
+    assert book.position is not None
+    assert book.halt_rule == "kill_switch"
+
+
+def test_reduce_only_does_not_open_a_position():
+    broker = _broker()
+    from mesa_trading.models import Order
+
+    ack = broker.submit(
+        Order(
+            client_order_id="solo-cierre",
+            cycle_id="1",
+            bot="gambler",
+            market="BTC-PERP",
+            side="sell",
+            action="close",
+            order_type="market",
+            qty=Decimal("0.1"),
+            notional_usd=Decimal("10"),
+            decision_time=NOW,
+            kind="perp",
+            reduce_only=True,
+        )
+    )
+    assert ack.accepted is False
+    assert ack.detail == "reduce_only_sin_posicion"
+    assert broker.positions() == []
 
 
 def test_protect_does_nothing_while_the_flag_is_off():

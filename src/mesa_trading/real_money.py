@@ -1,24 +1,20 @@
 """Guardas de la fase con pocos dólares. No hay broker real ni lectura de secretos.
 
-El flag `enabled` no puede ser true. El tick de staging no llama estas
-funciones: el servicio simulado sigue con su capital de papel y sin la
-wallet real. Las pruebas las ejercen contra SimBroker.
+El flag `enabled` no puede ser true. El tick simulado solo aplana si aparece
+`book/kill`. La wallet real no entra en este proceso.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from decimal import ROUND_DOWN, Decimal
 from typing import Callable
-from zoneinfo import ZoneInfo
 
-from mesa_trading.book.store import close_position
+from mesa_trading.book.store import close_position, equity_usd
 from mesa_trading.broker.base import Broker
 from mesa_trading.config import RealMoneyConfig
-from mesa_trading.models import Ack, BookState, Order
-from mesa_trading.util import as_utc, client_order_id, sha256_text
-
-CDMX = ZoneInfo("America/Mexico_City")
+from mesa_trading.models import Ack, BookState, Order, Position
+from mesa_trading.util import client_order_id, iso, sha256_text
 
 
 class SecretUnavailable(RuntimeError):
@@ -27,6 +23,10 @@ class SecretUnavailable(RuntimeError):
 
 class FlattenFailed(RuntimeError):
     """La posición sigue abierta. No se da por cerrada."""
+
+
+class BookConflict(RuntimeError):
+    """La escritura condicionada no pasó. No se mandó la orden."""
 
 
 def phase_capital(desk_capital: Decimal, caps: RealMoneyConfig) -> Decimal:
@@ -70,24 +70,36 @@ def require_key(loader: Callable[[], str | None]) -> str:
     return str(value).strip()
 
 
-def submit_once(broker: Broker, order: Order, loader: Callable[[], str | None], sent: dict[str, Ack]) -> Ack:
-    """No envía si la llave falla. Un reintento con el mismo cloid no vuelve a cruzar."""
+def submit_once(
+    broker: Broker,
+    order: Order,
+    loader: Callable[[], str | None],
+    book: BookState,
+    persist: Callable[[], bool] | None = None,
+) -> Ack:
+    """No envía si la llave falla. El mismo cloid no se vuelve a cruzar."""
     require_key(loader)
     cloid = hyperliquid_cloid(order.client_order_id)
-    cached = sent.get(cloid)
-    if cached is not None:
-        return cached
-    ack = broker.submit(order)
-    sent[cloid] = ack
-    return ack
+    if cloid in book.sent_orders:
+        return Ack(client_order_id=order.client_order_id, accepted=True, detail="idempotente")
+    book.sent_orders[cloid] = order.client_order_id
+    if len(book.sent_orders) > 50:
+        book.sent_orders = dict(list(book.sent_orders.items())[-50:])
+    if persist is not None and not persist():
+        book.sent_orders.pop(cloid, None)
+        raise BookConflict("escritura condicionada rechazada")
+    return broker.submit(order)
 
 
-def cancel_live(book: BookState, broker: Broker) -> None:
+def cancel_live(book: BookState, broker: Broker) -> bool:
+    """Borra la orden del libro solo después de que el venue confirme."""
     resting = book.resting_order
     if resting is None:
-        return
-    broker.cancel(resting.client_order_id)
+        return True
+    if not broker.cancel(resting.client_order_id):
+        return False
     book.resting_order = None
+    return True
 
 
 def flatten(
@@ -96,16 +108,20 @@ def flatten(
     now: datetime,
     *,
     loader: Callable[[], str | None],
-    sent: dict[str, Ack],
     reason: str,
+    persist: Callable[[], bool] | None = None,
 ) -> Decimal | None:
     pos = book.position
     if pos is None:
         return None
+    _align_sim_venue(book, broker)
     mark = _mark(book, pos.market, pos.entry_price)
+    if not book.inflight_close:
+        book.flatten_nonce += 1
+        book.inflight_close = client_order_id(f"{iso(now)}|{book.flatten_nonce}", pos.bot, pos.market, "close")
     order = Order(
-        client_order_id=client_order_id("flatten", pos.bot, pos.market, "close"),
-        cycle_id="flatten",
+        client_order_id=book.inflight_close,
+        cycle_id=str(book.flatten_nonce),
         bot=pos.bot,
         market=pos.market,
         side="sell" if pos.side == "long" else "buy",
@@ -116,13 +132,16 @@ def flatten(
         decision_time=now,
         reason=reason,
         kind=pos.kind,
+        reduce_only=True,
     )
-    submit_once(broker, order, loader, sent)
+    ack = submit_once(broker, order, loader, book, persist)
     fills = [fill for fill in broker.fills() if fill.client_order_id == order.client_order_id]
-    if not fills:
+    if not fills or not ack.accepted:
         raise FlattenFailed("la orden de cierre no cruzó")
     fill = fills[-1]
-    return close_position(book, fill.price, fill.fee_usd, fill.slippage_usd, fill.filled_at)
+    pnl = close_position(book, fill.price, fill.fee_usd, fill.slippage_usd, fill.filled_at)
+    book.inflight_close = None
+    return pnl
 
 
 def kill_switch(
@@ -131,14 +150,26 @@ def kill_switch(
     now: datetime,
     *,
     loader: Callable[[], str | None],
-    sent: dict[str, Ack],
+    persist: Callable[[], bool] | None = None,
 ) -> None:
-    """Cancela la orden viva, aplana y no reabre hasta la medianoche de Ciudad de México."""
-    require_key(loader)
+    """El halt queda puesto antes de tocar la llave, la cancelación o el cierre."""
     book.halted_until = next_cdmx_midnight(now)
     book.halt_rule = "kill_switch"
-    cancel_live(book, broker)
-    flatten(book, broker, now, loader=loader, sent=sent, reason="kill_switch")
+    book.kill_latched = True
+    if persist is not None and not persist():
+        raise BookConflict("escritura condicionada rechazada")
+    require_key(loader)
+    if not cancel_live(book, broker):
+        raise FlattenFailed("cancelacion no confirmada")
+    flatten(book, broker, now, loader=loader, reason="kill_switch", persist=persist)
+
+
+def day_pnl(book: BookState) -> Decimal:
+    """Realizado del día más lo que la posición abierta vale ahora."""
+    mark = None
+    if book.position is not None:
+        mark = _mark(book, book.position.market, book.position.entry_price)
+    return equity_usd(book, mark) - book.day_start_equity_usd
 
 
 def enforce_daily_loss(
@@ -148,16 +179,19 @@ def enforce_daily_loss(
     caps: RealMoneyConfig,
     *,
     loader: Callable[[], str | None],
-    sent: dict[str, Ack],
+    persist: Callable[[], bool] | None = None,
 ) -> bool:
-    """A −10 USD realizados en el día CDMX: cancela, aplana y frena."""
-    if book.day_realized_pnl_usd > -caps.max_daily_loss_usd:
+    """A −10 USD entre realizado y no realizado: cancela, aplana y frena."""
+    if day_pnl(book) > -caps.max_daily_loss_usd:
         return False
-    require_key(loader)
     book.halted_until = next_cdmx_midnight(now)
     book.halt_rule = "perdida_diaria_real"
-    cancel_live(book, broker)
-    flatten(book, broker, now, loader=loader, sent=sent, reason="perdida_diaria_real")
+    if persist is not None and not persist():
+        raise BookConflict("escritura condicionada rechazada")
+    require_key(loader)
+    if not cancel_live(book, broker):
+        raise FlattenFailed("cancelacion no confirmada")
+    flatten(book, broker, now, loader=loader, reason="perdida_diaria_real", persist=persist)
     return True
 
 
@@ -167,16 +201,22 @@ def reconcile_startup(
     now: datetime,
     *,
     loader: Callable[[], str | None],
-    sent: dict[str, Ack],
+    persist: Callable[[], bool] | None = None,
 ) -> bool:
-    """Si el proceso cayó con posición u orden viva, cancela y aplana antes de operar."""
-    if book.position is None and book.resting_order is None:
+    """La posición que manda es la del venue. El libro se pone a la par."""
+    venue = broker.positions()
+    if not venue and book.position is None and book.resting_order is None:
         return False
-    require_key(loader)
     book.halted_until = next_cdmx_midnight(now)
     book.halt_rule = "reconciliacion"
-    cancel_live(book, broker)
-    flatten(book, broker, now, loader=loader, sent=sent, reason="reconciliacion")
+    require_key(loader)
+    if not cancel_live(book, broker):
+        raise FlattenFailed("cancelacion no confirmada")
+    if venue:
+        _adopt_venue(book, venue[0], now)
+        flatten(book, broker, now, loader=loader, reason="reconciliacion", persist=persist)
+    elif book.position is not None:
+        book.position = None
     return True
 
 
@@ -188,9 +228,40 @@ def protect(caps: RealMoneyConfig, book: BookState) -> str:
 
 
 def next_cdmx_midnight(now: datetime) -> datetime:
-    local = as_utc(now).astimezone(CDMX)
-    nxt = datetime(local.year, local.month, local.day, tzinfo=CDMX) + timedelta(days=1)
-    return nxt.astimezone(timezone.utc)
+    from mesa_trading.loop.cycle import _next_midnight
+
+    return _next_midnight(now)
+
+
+def _align_sim_venue(book: BookState, broker: Broker) -> None:
+    if book.position is None or broker.positions():
+        return
+    seed = getattr(broker, "seed_position", None)
+    if seed is None:
+        return
+    pos = book.position
+    seed(pos.market, pos.side, pos.qty, pos.entry_price)
+
+
+def _adopt_venue(book: BookState, venue: dict, now: datetime) -> None:
+    market = str(venue["market"])
+    side = venue["side"]
+    qty = Decimal(str(venue["qty"]))
+    if book.position is not None and book.position.market == market:
+        book.position.qty = qty
+        book.position.side = side
+        return
+    entry = Decimal(str(venue.get("entry") or _mark(book, market, Decimal("0"))))
+    book.position = Position(
+        market=market,
+        bot="gambler",
+        side=side,
+        qty=qty,
+        entry_price=entry,
+        notional_usd=qty * entry,
+        opened_at=now,
+        kind="perp",
+    )
 
 
 def _mark(book: BookState, market: str, fallback: Decimal) -> Decimal:
