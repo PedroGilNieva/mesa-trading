@@ -10,6 +10,8 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from decimal import Decimal
+
 from mesa_trading.config import default_desk_path, load_desk
 from mesa_trading.policy.decide import load_policy
 from mesa_trading.reports.decisions import cached_decision_report
@@ -38,11 +40,14 @@ def create_app(root: DataRoot | None = None, desk_path: Path | None = None) -> F
         book = _json(store, "book/state.json")
         state = (book or {}).get("state") or {}
         position = state.get("position")
+        unrealized, equity = _mark_to_market(state)
         return {
             "ultimo_ciclo": state.get("last_cycle_id"),
             "ultimo_ciclo_en": state.get("last_cycle_at"),
             "operaciones_cerradas": state.get("closed_trades", 0),
             "pnl_realizado_usd": state.get("realized_pnl_usd", "0"),
+            "pnl_no_realizado_usd": unrealized,
+            "equity_usd": equity,
             "pnl_dia_usd": state.get("day_realized_pnl_usd", "0"),
             "comisiones_usd": state.get("fees_usd", "0"),
             "deslizamiento_usd": state.get("slippage_usd", "0"),
@@ -91,6 +96,25 @@ def create_app(root: DataRoot | None = None, desk_path: Path | None = None) -> F
         return _report(store, f"reportes/calibracion/{fecha}.json")
 
     return app
+
+
+def _mark_to_market(state: dict) -> tuple[str, str]:
+    cash = Decimal(str(state.get("cash_usd") or "0"))
+    position = state.get("position") or None
+    if not position:
+        return "0", format(cash, "f")
+    entry = Decimal(str(position.get("entry_price") or "0"))
+    qty = Decimal(str(position.get("qty") or "0"))
+    prices = state.get("last_prices") or {}
+    raw = prices.get(position.get("market"))
+    mark = Decimal(str(raw)) if raw is not None else entry
+    if position.get("side") == "short":
+        unrealized = (entry - mark) * qty
+        equity = cash + Decimal(str(position.get("notional_usd") or "0")) + unrealized
+    else:
+        unrealized = (mark - entry) * qty
+        equity = cash + qty * mark
+    return format(unrealized, "f"), format(equity, "f")
 
 
 def _report(store: DataRoot, key: str):

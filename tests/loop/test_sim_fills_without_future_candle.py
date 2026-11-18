@@ -21,3 +21,5 @@ def test_simulated_cycle_fills_at_the_book(tmp_path):
     assert state.recent_fills[-1]["bot"] == "gambler"
     assert state.recent_fills[-1]["market"] == "BTC-PERP"
     assert state.recent_fills[-1]["reason"] == "entrada"
+    assert state.recent_fills[-1]["side"] == "long"
+    assert state.recent_fills[-1]["order_side"] == "buy"
