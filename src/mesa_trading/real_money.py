@@ -260,9 +260,14 @@ def reconcile_startup(
     loader: Callable[[], str | None],
     persist: Callable[[], bool] | None = None,
 ) -> bool:
-    """La posición que manda es la del venue. Si no se puede leer, no se toca el libro."""
+    """La posición que manda es la del venue. Si no se puede leer, no se toca el libro.
+
+    Si el venue y el libro coinciden no se hace nada. Si no coinciden, se
+    cancela lo abierto, se aplana y la mesa queda frenada hasta la medianoche
+    de Ciudad de México: un desfase sin explicar no se opera.
+    """
     positions, orders = read_venue(broker)
-    if not positions and not orders and book.position is None and book.resting_order is None:
+    if venue_matches(book, positions, orders):
         return False
     book.halted_until = next_cdmx_midnight(now)
     book.halt_rule = "reconciliacion"
@@ -277,6 +282,25 @@ def reconcile_startup(
     if book.position is not None and not positions:
         book.position = None
     return True
+
+
+def venue_matches(book: BookState, positions: list[dict], orders: list[dict]) -> bool:
+    """Mismo mercado, lado y cantidad; y las órdenes abiertas son las del libro."""
+    venue_orders = {str(item.get("client_order_id") or "") for item in orders}
+    book_orders = {book.resting_order.client_order_id} if book.resting_order is not None else set()
+    if venue_orders != book_orders:
+        return False
+    pos = book.position
+    if pos is None:
+        return not positions
+    if len(positions) != 1:
+        return False
+    venue = positions[0]
+    try:
+        qty = Decimal(str(venue.get("qty")))
+    except Exception:
+        return False
+    return str(venue.get("market")) == pos.market and venue.get("side") == pos.side and qty == pos.qty
 
 
 def protect(caps: RealMoneyConfig, book: BookState) -> str:

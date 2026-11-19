@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -48,6 +48,10 @@ class DeskEnv:
     wallet_factory: Callable[[], Any] | None = None
     flags_factory: Callable[[], Any] | None = None
     submits: list = field(default_factory=list)
+    # Venue contra el que se concilia al empezar el ciclo, solo con la fase real.
+    # None: el libro de papel es el venue y no hay nada que conciliar. Este repo
+    # nunca arma aquí un broker real; las pruebas pasan un SimBroker.
+    venue_factory: Callable[[], Any] | None = None
 
 
 def run_cycle(env: DeskEnv, cycle_id: str, now: datetime) -> dict:
@@ -95,6 +99,11 @@ def _run_locked(env: DeskEnv, cycle_id: str, now: datetime) -> dict:
     resumed = _roll_day(env, state, cycle_id, now)
     _latch_kill(env, state, now, writer)
     funnel = _empty_funnel()
+    # Antes de decidir: el libro coincide con el venue y la pérdida del día no pasó del tope.
+    blocked = _real_guards(env, state, cycle_id, now, writer)
+    if blocked is not None:
+        wrote = _finish(env, state, writer.generation, cycle_id, now, blocked, funnel)
+        return {"orders": 0, "halted": state.halted_until is not None, "blocked": blocked, "book_rejected": not wrote}
     if state.halted_until is not None and now < as_utc(state.halted_until):
         _emit(
             env,
@@ -114,6 +123,7 @@ def _run_locked(env: DeskEnv, cycle_id: str, now: datetime) -> dict:
     elif state.position is not None:
         orders += _manage(env, state, cycle_id, now, funnel)
     _maybe_halt(env, state, cycle_id, now)
+    _daily_loss_guard(env, state, cycle_id, now, writer)
     wrote = _finish(env, state, writer.generation, cycle_id, now, "ok", funnel)
     return {"orders": orders, "halted": state.halted_until is not None, "book_rejected": not wrote}
 
@@ -279,7 +289,31 @@ def _submit(env, state, proposal: Proposal, snapshot, cycle_id, now, mode, book=
     price = _mark(snapshot)
     if price is None or price <= 0:
         return 0
-    qty = (proposal.notional_usd / price).quantize(Decimal("0.00000001"))
+    notional = _order_notional(env, state, proposal, snapshot, price)
+    if notional <= 0:
+        _emit(
+            env,
+            "RiskVetoed",
+            cycle_id,
+            now,
+            bot=proposal.bot,
+            mode=mode,
+            payload={"market": market, "regla": "tope_nocional_orden", "detail": "la orden no cabe en el tope", "pedido_usd": str(proposal.notional_usd)},
+            parts=(market, "tope_nocional_orden"),
+        )
+        return 0
+    if notional < proposal.notional_usd:
+        _emit(
+            env,
+            "OrderCapped",
+            cycle_id,
+            now,
+            bot=proposal.bot,
+            mode=mode,
+            payload={"market": market, "pedido_usd": str(proposal.notional_usd), "enviado_usd": str(notional)},
+            parts=(market, "tope"),
+        )
+    qty = (notional / price).quantize(Decimal("0.00000001"))
     side = "sell" if proposal.action == "short" else "buy"
     order = Order(
         client_order_id=client_order_id(cycle_id, proposal.bot, market, proposal.action),
@@ -290,7 +324,7 @@ def _submit(env, state, proposal: Proposal, snapshot, cycle_id, now, mode, book=
         action=proposal.action,
         order_type="market" if proposal.action != "quote" else "limit",
         qty=qty,
-        notional_usd=proposal.notional_usd,
+        notional_usd=notional,
         limit_price=(price - env.config.markets[market].tick) if proposal.action == "quote" else None,
         decision_time=now,
         reason=proposal.reason,
@@ -327,7 +361,7 @@ def _submit(env, state, proposal: Proposal, snapshot, cycle_id, now, mode, book=
         bot=proposal.bot,
         market=market,
         action=proposal.action,
-        notional_usd=proposal.notional_usd,
+        notional_usd=order.notional_usd,
         kind=proposal.kind,
         threshold_version=proposal.threshold_version,
         cuenta_como_evidencia=policy_counts_as_evidence(env.policy),
@@ -1107,27 +1141,9 @@ def _latch_kill(env, state, now, writer: _Writer) -> None:
     state.kill_latched = True
     if state.position is None and state.resting_order is None:
         return
-    market = state.position.market if state.position is not None else state.resting_order.market
-    mark = _last_mark(state)
-    if state.resting_order is not None and (mark is None or mark <= 0):
-        raw = state.last_prices.get(state.resting_order.market)
-        mark = Decimal(raw) if raw else None
-    if mark is None or mark <= 0:
+    broker = _mirror_broker(env, state, now)
+    if broker is None:
         return
-    spec = env.config.markets[market]
-    connector = env.connector_for(market)
-    try:
-        raw_book = connector.order_book(spec.product or market) or connector.order_book(market)
-    except Exception:
-        return
-    broker = _sim(
-        env,
-        market,
-        {"last_close": str(mark), "spread_bps": "2", "liquidity_usd": "1000000"},
-        mark,
-        book=raw_book,
-        decision=now,
-    )
     try:
         kill_switch(
             state,
@@ -1138,6 +1154,176 @@ def _latch_kill(env, state, now, writer: _Writer) -> None:
         )
     except (BookConflict, FlattenFailed, SecretUnavailable):
         return
+
+
+def _mirror_broker(env, state, now):
+    """SimBroker con el precio y el libro de este momento, para cancelar y aplanar."""
+    if state.position is None and state.resting_order is None:
+        return None
+    market = state.position.market if state.position is not None else state.resting_order.market
+    mark = _last_mark(state)
+    if state.resting_order is not None and (mark is None or mark <= 0):
+        raw = state.last_prices.get(state.resting_order.market)
+        mark = Decimal(raw) if raw else None
+    if mark is None or mark <= 0:
+        return None
+    spec = env.config.markets[market]
+    connector = env.connector_for(market)
+    try:
+        raw_book = connector.order_book(spec.product or market) or connector.order_book(market)
+    except Exception:
+        return None
+    return _sim(
+        env,
+        market,
+        {"last_close": str(mark), "spread_bps": "2", "liquidity_usd": "1000000"},
+        mark,
+        book=raw_book,
+        decision=now,
+    )
+
+
+def _real_phase(env) -> bool:
+    from mesa_trading.real_money import phase_is_on
+
+    return phase_is_on(env.config.real_money)
+
+
+def _real_guards(env, state, cycle_id: str, now: datetime, writer: _Writer) -> str | None:
+    """Conciliación y freno diario de la fase real, antes de decidir.
+
+    Con la fase apagada no hace nada: la mesa de papel sigue con sus propios
+    límites. Devuelve el motivo para no decidir en este ciclo, o None.
+    """
+    if not _real_phase(env):
+        return None
+    from mesa_trading.real_money import (
+        BookConflict,
+        FlattenFailed,
+        SecretUnavailable,
+        VenueUnknown,
+        reconcile_startup,
+    )
+
+    if env.venue_factory is not None:
+        before = _book_view(state)
+        try:
+            venue = env.venue_factory()
+        except Exception as exc:
+            _emit(env, "ReconcileFailed", cycle_id, now, payload={"motivo": exc.__class__.__name__})
+            return "sin_conciliar"
+        try:
+            changed = reconcile_startup(
+                state,
+                venue,
+                now,
+                loader=lambda: "simulado",
+                persist=lambda: writer.persist(state),
+            )
+        except VenueUnknown as exc:
+            # No se sabe qué hay en el venue: no se decide y el libro no se toca.
+            _emit(env, "ReconcileFailed", cycle_id, now, payload={"motivo": str(exc)})
+            return "sin_conciliar"
+        except (BookConflict, FlattenFailed, SecretUnavailable) as exc:
+            state.halted_until = state.halted_until or _next_midnight(now)
+            state.halt_rule = state.halt_rule or "reconciliacion"
+            _emit(env, "ReconcileFailed", cycle_id, now, payload={"motivo": exc.__class__.__name__})
+            return "sin_conciliar"
+        if changed:
+            _emit(
+                env,
+                "BookReconciled",
+                cycle_id,
+                now,
+                payload={"antes": before, "despues": _book_view(state), "hasta": iso(state.halted_until) if state.halted_until else None},
+            )
+    _daily_loss_guard(env, state, cycle_id, now, writer)
+    return None
+
+
+def _daily_loss_guard(env, state, cycle_id: str, now: datetime, writer: _Writer) -> bool:
+    """A max_daily_loss_usd (realizado + no realizado): cancela, aplana y frena hasta medianoche CDMX."""
+    if not _real_phase(env):
+        return False
+    if state.halt_rule == "perdida_diaria_real" and state.halted_until is not None and now < as_utc(state.halted_until):
+        return True
+    from mesa_trading.real_money import (
+        BookConflict,
+        FlattenFailed,
+        SecretUnavailable,
+        day_pnl,
+        enforce_daily_loss,
+    )
+    from mesa_trading.broker.sim import SimBroker as _Empty
+
+    caps = env.config.real_money
+    pnl = day_pnl(state)
+    if pnl > -caps.max_daily_loss_usd:
+        return False
+    broker = None
+    if env.venue_factory is not None:
+        try:
+            broker = env.venue_factory()
+        except Exception:
+            broker = None
+    if broker is None:
+        broker = _mirror_broker(env, state, now) or _Empty()
+    try:
+        enforce_daily_loss(
+            state,
+            broker,
+            now,
+            caps,
+            loader=lambda: "simulado",
+            persist=lambda: writer.persist(state),
+        )
+    except (BookConflict, FlattenFailed, SecretUnavailable) as exc:
+        # El freno ya quedó puesto antes de intentar el cierre.
+        _emit(env, "FlattenFailed", cycle_id, now, payload={"regla": "perdida_diaria_real", "motivo": exc.__class__.__name__})
+    state.halted_until = state.halted_until or _next_midnight(now)
+    state.halt_rule = "perdida_diaria_real"
+    _emit(
+        env,
+        "DeskHalted",
+        cycle_id,
+        now,
+        payload={"hasta": iso(state.halted_until), "regla": "perdida_diaria_real", "pnl_dia_usd": str(pnl)},
+        parts=("perdida_diaria_real",),
+    )
+    return True
+
+
+def _order_notional(env, state, proposal: Proposal, snapshot: dict, price: Decimal) -> Decimal:
+    """El nocional de la orden que sale, no el de la propuesta.
+
+    Siempre: no pasa del máximo por posición de la mesa. Con la fase real,
+    además, el costo con comisión y slippage cabe en max_order_usd y en el saldo.
+    """
+    requested = proposal.notional_usd
+    if requested <= 0:
+        return Decimal("0")
+    paper_cap = (equity_usd(state, None) * env.config.risk.max_position_pct).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+    notional = min(requested, paper_cap)
+    if _real_phase(env):
+        from mesa_trading.real_money import capped_notional
+
+        schedule = env.fees[env.config.markets[proposal.market].fee_schedule]
+        notional = capped_notional(
+            notional,
+            cash=state.cash_usd,
+            caps=env.config.real_money,
+            fee_bps=schedule.taker_bps,
+            slip_bps=Decimal(str(snapshot.get("spread_bps") or "0")),
+        )
+    return max(notional, Decimal("0"))
+
+
+def _book_view(state) -> dict:
+    pos = state.position
+    return {
+        "posicion": None if pos is None else {"market": pos.market, "side": pos.side, "qty": str(pos.qty)},
+        "orden_viva": state.resting_order.client_order_id if state.resting_order is not None else None,
+    }
 
 
 def _finish(env, state, generation, cycle_id, now, result, funnel) -> bool:
