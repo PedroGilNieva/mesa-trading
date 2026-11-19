@@ -52,8 +52,9 @@ def create_app(root: DataRoot | None = None, desk_path: Path | None = None) -> F
             "pnl_dia_usd": state.get("day_realized_pnl_usd", "0"),
             "comisiones_usd": state.get("fees_usd", "0"),
             "deslizamiento_usd": state.get("slippage_usd", "0"),
+            "gas_usd": state.get("gas_usd", "0"),
             # Bruto vs. neto (#26). acumulado_libro es en vivo; lo demás es del último reporte.
-            "costos": _costos(store, state),
+            "costos": _costos(store, state, config),
             "ultimos_fills": state.get("recent_fills") or [],
             "posicion_abierta": position,
             "resting_order": state.get("resting_order"),
@@ -101,14 +102,18 @@ def create_app(root: DataRoot | None = None, desk_path: Path | None = None) -> F
     return app
 
 
-def _costos(store: DataRoot, state: dict) -> dict:
+def _costos(store: DataRoot, state: dict, config) -> dict:
     resumen = _json(store, RESUMEN_KEY) or {}
     return {
-        "acumulado_libro": book_cost_view(state),
+        "acumulado_libro": book_cost_view(state, config),
         "actualizado_en": resumen.get("actualizado_en"),
         "ventana_24h": resumen.get("ventana_24h"),
         "por_dia_cdmx": resumen.get("por_dia_cdmx"),
         "acumulado": resumen.get("acumulado"),
+        # Comisiones por tipo de mercado (dex / perps), del último reporte (#29).
+        # En vivo, desde #29: acumulado_libro.por_tipo_mercado.
+        "por_tipo_mercado": resumen.get("por_tipo_mercado"),
+        "recalculo_tabla_actual": resumen.get("recalculo_tabla_actual"),
         "modelo_comisiones": resumen.get("modelo_comisiones"),
     }
 

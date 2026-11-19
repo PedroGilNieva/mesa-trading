@@ -94,7 +94,8 @@ markets:
     product: WETH-USDC
     network: eth
     pool: "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640"
-    fee_schedule: dex_pool
+    # Tier real del pool (5 bps), no la tabla genérica de 30 bps. Ver config/fees.yaml.
+    fee_schedule: uniswap_v3_weth_usdc_005
     tick: 0.01
 house_range:
   WETH-USDC:

@@ -86,7 +86,9 @@ class Position(BaseModel):
     notional_usd: Decimal
     opened_at: datetime
     fees_usd: Decimal = Decimal("0")
+    # Solo informativo: ya está dentro de entry_price. No se resta otra vez.
     slippage_usd: Decimal = Decimal("0")
+    gas_usd: Decimal = Decimal("0")
     kind: Literal["spot", "perp"] = "spot"
     threshold_version: int = 0
     cuenta_como_evidencia: bool = False
@@ -101,7 +103,15 @@ class BookState(BaseModel):
     realized_pnl_usd: Decimal = Decimal("0")
     day_realized_pnl_usd: Decimal = Decimal("0")
     fees_usd: Decimal = Decimal("0")
+    # Deslizamiento acumulado. Va dentro del precio de los fills; es desglose, no un cargo aparte.
     slippage_usd: Decimal = Decimal("0")
+    # Gas cobrado por pata en fills DEX (#29). Los libros viejos no lo traen.
+    gas_usd: Decimal = Decimal("0")
+    # Deslizamiento que el realizado viejo restó dos veces (antes de #29). Se congela
+    # en la primera escritura con la contabilidad nueva; None = libro que aún no pasó por ella.
+    slippage_double_counted_legacy_usd: Decimal | None = None
+    # Comisión, deslizamiento y gas por mercado, desde #29: mercado -> montos.
+    costs_by_market: dict[str, dict[str, str]] = Field(default_factory=dict)
     peak_equity_usd: Decimal
     position: Position | None = None
     resting_order: RestingOrder | None = None

@@ -220,7 +220,8 @@ class SimBroker(Broker):
 
     def _apply_fill(self, fill: Fill, order: Order) -> None:
         self._fills.append(fill)
-        cost = fill.fee_usd + fill.slippage_usd + fill.gas_usd
+        # El deslizamiento ya está en fill.price; no se cobra otra vez.
+        cost = fill.fee_usd + fill.gas_usd
         signed = fill.qty * fill.price
         if order.reduce_only or (fill.side == "sell" and order.action == "close"):
             if fill.side == "buy":
