@@ -15,7 +15,8 @@ class Broker(ABC):
         raise NotImplementedError  # pragma: no cover
 
     @abstractmethod
-    def cancel(self, client_order_id: str) -> None:
+    def cancel(self, client_order_id: str) -> bool:
+        """True solo cuando el venue confirmó la cancelación."""
         raise NotImplementedError  # pragma: no cover
 
     @abstractmethod

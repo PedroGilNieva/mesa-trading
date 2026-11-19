@@ -26,6 +26,7 @@ class Order(BaseModel):
     reason: str = ""
     leverage: Decimal = Decimal("1")
     kind: Literal["spot", "perp"] = "spot"
+    reduce_only: bool = False
 
 
 class Ack(BaseModel):
@@ -119,6 +120,11 @@ class BookState(BaseModel):
     max_drawdown_usd: Decimal = Decimal("0")
     # Los últimos fills, para /estado, sin releer la bitácora.
     recent_fills: list[dict[str, Any]] = Field(default_factory=list)
+    # cloid ya mandado -> client_order_id. Sobrevive un reintento del mismo intento.
+    sent_orders: dict[str, str] = Field(default_factory=dict)
+    kill_latched: bool = False
+    flatten_nonce: int = 0
+    inflight_close: str | None = None
 
     @model_validator(mode="before")
     @classmethod

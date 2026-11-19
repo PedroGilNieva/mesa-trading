@@ -100,3 +100,10 @@ house_range:
   WETH-USDC:
     low: 100
     high: 20000
+# Borrador. No enciende un broker real. Ver docs/fase-dolares-reales.md.
+real_money:
+  enabled: false
+  venue: hyperliquid
+  max_capital_usd: 100
+  max_order_usd: 25
+  max_daily_loss_usd: 10

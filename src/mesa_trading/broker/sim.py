@@ -51,21 +51,40 @@ class SimBroker(Broker):
         self._fills: list[Fill] = []
         self._positions: dict[str, dict] = {}
         self._cancelled: set[str] = set()
+        self._acks: dict[str, tuple[bool, str]] = {}
 
     def submit(self, order: Order) -> Ack:
         if order.client_order_id in self._orders:
             return Ack(client_order_id=order.client_order_id, accepted=True, detail="idempotente")
         self._orders[order.client_order_id] = order
         if order.client_order_id in self._cancelled:
-            return Ack(client_order_id=order.client_order_id, accepted=False, detail="cancelada")
+            ack = Ack(client_order_id=order.client_order_id, accepted=False, detail="cancelada")
+            self._acks[order.client_order_id] = (False, ack.detail)
+            return ack
+        if order.reduce_only and not self._reduces(order):
+            ack = Ack(client_order_id=order.client_order_id, accepted=False, detail="reduce_only_sin_posicion")
+            self._acks[order.client_order_id] = (False, ack.detail)
+            return ack
+        self._cap_reduce_qty(order)
         fill = self._try_fill(order)
         if fill is None:
-            return Ack(client_order_id=order.client_order_id, accepted=True, detail="ack_sin_fill")
+            ack = Ack(client_order_id=order.client_order_id, accepted=True, detail="ack_sin_fill")
+            self._acks[order.client_order_id] = (True, ack.detail)
+            return ack
         self._apply_fill(fill, order)
-        return Ack(client_order_id=order.client_order_id, accepted=True, detail="filled")
+        ack = Ack(client_order_id=order.client_order_id, accepted=True, detail="filled")
+        self._acks[order.client_order_id] = (True, ack.detail)
+        return ack
 
-    def cancel(self, client_order_id: str) -> None:
+    def cancel(self, client_order_id: str) -> bool:
+        if any(fill.client_order_id == client_order_id for fill in self._fills):
+            return False
         self._cancelled.add(client_order_id)
+        return True
+
+    def seed_position(self, market: str, side: str, qty: Decimal, entry: Decimal) -> None:
+        """La posición que el libro de papel ya tiene, vista como venue simulado."""
+        self._positions[market] = {"market": market, "qty": qty, "side": side, "entry": str(entry)}
 
     def fills(self, since: datetime | None = None) -> list[Fill]:
         if since is None:
@@ -75,6 +94,40 @@ class SimBroker(Broker):
 
     def positions(self) -> list[dict]:
         return [dict(item) for item in self._positions.values()]
+
+    def open_orders(self) -> list[dict]:
+        filled = {fill.client_order_id for fill in self._fills}
+        found = []
+        for client_order_id, order in self._orders.items():
+            if client_order_id in filled or client_order_id in self._cancelled:
+                continue
+            found.append(
+                {
+                    "client_order_id": client_order_id,
+                    "market": order.market,
+                    "side": order.side,
+                    "qty": order.qty,
+                    "bot": order.bot,
+                    "kind": order.kind,
+                    "notional_usd": order.notional_usd,
+                }
+            )
+        return found
+
+    def order_status(self, client_order_id: str) -> str:
+        if any(fill.client_order_id == client_order_id for fill in self._fills):
+            return "filled"
+        known = self._acks.get(client_order_id)
+        if known is None:
+            return "unknown"
+        accepted, detail = known
+        if not accepted:
+            return "rejected"
+        if detail == "ack_sin_fill":
+            return "sin_fill"
+        if detail == "filled":
+            return "filled"
+        return "accepted"
 
     def balance(self) -> Decimal:
         return self.cash_usd
@@ -144,16 +197,52 @@ class SimBroker(Broker):
             reason=order.reason,
         )
 
+    def _reduces(self, order: Order) -> bool:
+        pos = self._positions.get(order.market)
+        if not pos:
+            return False
+        if order.side == "sell" and pos.get("side") == "long":
+            return True
+        return order.side == "buy" and pos.get("side") == "short"
+
+    def _cap_reduce_qty(self, order: Order) -> None:
+        if not order.reduce_only:
+            return
+        pos = self._positions.get(order.market)
+        if not pos:
+            return
+        have = Decimal(str(pos["qty"]))
+        if have <= 0 or order.qty <= have:
+            return
+        if order.qty > 0:
+            order.notional_usd = order.notional_usd * have / order.qty
+        order.qty = have
+
     def _apply_fill(self, fill: Fill, order: Order) -> None:
         self._fills.append(fill)
         cost = fill.fee_usd + fill.slippage_usd + fill.gas_usd
         signed = fill.qty * fill.price
+        if order.reduce_only or (fill.side == "sell" and order.action == "close"):
+            if fill.side == "buy":
+                self.cash_usd -= signed + cost
+            else:
+                self.cash_usd += signed - cost
+            pos = self._positions.get(order.market)
+            if pos is None:
+                return
+            left = Decimal(str(pos["qty"])) - fill.qty
+            if left <= 0:
+                self._positions.pop(order.market, None)
+            else:
+                pos["qty"] = left
+            return
         if fill.side == "buy":
             self.cash_usd -= signed + cost
             self._positions[order.market] = {
                 "market": order.market,
                 "qty": fill.qty,
                 "side": "long" if order.action != "short" else "short",
+                "entry": str(fill.price),
             }
         else:
             self.cash_usd += signed - cost
