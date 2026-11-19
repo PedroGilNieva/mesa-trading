@@ -23,6 +23,19 @@ Mesa de trading 24/7 con **dinero simulado**. No hay broker real, ni llaves de e
 - `GET /reportes/diario/{fecha}.json`
 - `GET /reportes/calibracion/{fecha}.json`
 
+## PnL bruto vs. neto y costos
+
+Solo medición (`src/mesa_trading/reports/costos.py`). No cambia umbrales, tamaño ni la contabilidad del libro.
+
+- El reporte diario trae `costos` en el JSON y una sección en el Markdown: últimas 24 h, por día (CDMX), acumulado y por estrategia (house, gambler). Para cada uno muestra el PnL bruto, las comisiones, el deslizamiento estimado y el PnL neto.
+- Por estrategia y por señal (estrategia/mercado/lado) muestra el número de operaciones, el tamaño promedio, el bruto promedio y el costo promedio, en USD y en bps. También dice si la señal cubre sus costos.
+- `GET /estado` → `costos.acumulado_libro` sale en vivo de `book/state.json`. Lo demás (24 h, por día, por estrategia) viene del último reporte (`reportes/costos/resumen.json`).
+- El estado acumulado vive en `reportes/costos/estado.json`. La primera corrida sin ese archivo relee la bitácora desde el inicio del libro, con un máximo de 60 días.
+- Modelo de comisiones: `comision = max(nocional × taker_bps / 10000, min_fee_usd)` por pata, con los valores de `config/fees.yaml`. Hoy `min_fee_usd` es 0 en los mercados activos, así que no hay parte fija y el costo escala 1:1 con el tamaño. `gas_usd` está en la tabla, pero el libro no lo cobra.
+- `bruto` se mide desde el precio del fill sin deslizamiento. Si el fill cruzó el libro, ese precio es el bid/ask, así que el medio spread queda dentro del bruto.
+- `pnl_libro` es lo que guarda el libro hoy. Resta el deslizamiento dos veces: una en el precio del fill y otra en `close_position`. El reporte muestra la diferencia como `deslizamiento_doble_contado_usd`, pero no la corrige.
+- La sección "qué habría pasado" es solo un reporte. Vuelve a filtrar las operaciones pasadas con umbrales de entrada más altos y reescala el tamaño ×2 y ×4.
+
 ## Desarrollo
 
 ```bash

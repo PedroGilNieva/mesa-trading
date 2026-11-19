@@ -14,6 +14,7 @@ from decimal import Decimal
 
 from mesa_trading.config import default_desk_path, load_desk
 from mesa_trading.policy.decide import load_policy
+from mesa_trading.reports.costos import RESUMEN_KEY, book_cost_view
 from mesa_trading.reports.decisions import cached_decision_report
 from mesa_trading.storage import DataRoot, data_root_from_env
 
@@ -51,6 +52,8 @@ def create_app(root: DataRoot | None = None, desk_path: Path | None = None) -> F
             "pnl_dia_usd": state.get("day_realized_pnl_usd", "0"),
             "comisiones_usd": state.get("fees_usd", "0"),
             "deslizamiento_usd": state.get("slippage_usd", "0"),
+            # Bruto vs. neto (#26). acumulado_libro es en vivo; lo demás es del último reporte.
+            "costos": _costos(store, state),
             "ultimos_fills": state.get("recent_fills") or [],
             "posicion_abierta": position,
             "resting_order": state.get("resting_order"),
@@ -96,6 +99,18 @@ def create_app(root: DataRoot | None = None, desk_path: Path | None = None) -> F
         return _report(store, f"reportes/calibracion/{fecha}.json")
 
     return app
+
+
+def _costos(store: DataRoot, state: dict) -> dict:
+    resumen = _json(store, RESUMEN_KEY) or {}
+    return {
+        "acumulado_libro": book_cost_view(state),
+        "actualizado_en": resumen.get("actualizado_en"),
+        "ventana_24h": resumen.get("ventana_24h"),
+        "por_dia_cdmx": resumen.get("por_dia_cdmx"),
+        "acumulado": resumen.get("acumulado"),
+        "modelo_comisiones": resumen.get("modelo_comisiones"),
+    }
 
 
 def _mark_to_market(state: dict) -> tuple[str, str]:
