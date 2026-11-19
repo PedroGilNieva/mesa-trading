@@ -153,8 +153,9 @@ class HyperliquidInfoConnector:
         rows = []
         for item in json.loads(raw):
             start_dt = datetime.fromtimestamp(int(item["t"]) / 1000, tz=timezone.utc)
+            seconds = _INTERVAL_S.get(interval, 300)
             rows.append(
-                _candle(start_dt, 300, item["o"], item["h"], item["l"], item["c"], item["v"])
+                _candle(start_dt, seconds, item["o"], item["h"], item["l"], item["c"], item["v"])
             )
         rows.sort(key=lambda row: row["ts"])
         return rows
@@ -187,6 +188,29 @@ class HyperliquidInfoConnector:
                 return {"rate": ctx.get("funding"), "as_of": datetime.now(timezone.utc)}
         return None
 
+    def funding_history(self, symbol: str, start_ms: int, end_ms: int) -> list[tuple[int, Decimal]]:
+        """Funding pagado por hora (`fundingHistory`). Hasta 500 filas por llamada."""
+        body = {"type": "fundingHistory", "coin": symbol, "startTime": int(start_ms), "endTime": int(end_ms)}
+        status, raw = self._info(body)
+        if status != 200:
+            raise ConnectionError(f"hyperliquid fundingHistory {status}")
+        rows = [(int(item["time"]), Decimal(str(item["fundingRate"]))) for item in json.loads(raw)]
+        rows.sort(key=lambda row: row[0])
+        return rows
+
+    def asset_context(self, symbol: str) -> dict | None:
+        """markPx, oraclePx (índice spot) y funding actual, del mismo metaAndAssetCtxs cacheado."""
+        universe, ctxs = self._asset_ctxs()
+        for meta, ctx in zip(universe, ctxs):
+            if meta.get("name") == symbol:
+                return {
+                    "mark": ctx.get("markPx"),
+                    "oracle": ctx.get("oraclePx"),
+                    "funding": ctx.get("funding"),
+                    "as_of": datetime.now(timezone.utc),
+                }
+        return None
+
     def _asset_ctxs(self) -> tuple[list, list]:
         # metaAndAssetCtxs pesa 20 y trae todos los perps. Un ciclo lo pide una vez.
         now = datetime.now(timezone.utc)
@@ -212,6 +236,9 @@ class HyperliquidInfoConnector:
         if body.get("type") is None:
             raise ValueError("info sin type")
         return self.client.request("POST", f"{HYPERLIQUID}/info", body=body)
+
+
+_INTERVAL_S = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
 
 
 def _candle(start: datetime, seconds: int, open_, high, low, close, volume) -> dict:

@@ -40,6 +40,10 @@ Medición en `src/mesa_trading/reports/costos.py`. No cambia umbrales ni tamaño
 - `recalculo_tabla_actual` es un reporte aparte: vuelve a calcular las operaciones guardadas con el deslizamiento una vez, la comisión de la tabla de hoy (p. ej. 5 bps en el pool) y el gas, y separa el efecto de cada corrección. No toca el libro.
 - La sección "qué habría pasado" es solo un reporte. Vuelve a filtrar las operaciones pasadas con umbrales de entrada más altos y reescala el tamaño ×2 y ×4 (el gas por pata no escala).
 
+## Estrategias en sombra (#31)
+
+`carry` (spot largo + perp corto, cobra funding) y `tendencia` (ETH/BTC, régimen 1D + ruptura de 4h, tamaño por riesgo) corren **en papel** al final de cada tick, con capital teórico de 10,000 USD cada una y libro aparte (`sombra/`). No tocan house/gambler ni el libro de la mesa. `/estado` y el reporte diario muestran bruto, costos, neto, operaciones, drawdown máximo, la persistencia del funding (30 y 90 días) y el progreso de cada regla de descarte. Detalle en `docs/sombra.md`.
+
 ## Desarrollo
 
 ```bash

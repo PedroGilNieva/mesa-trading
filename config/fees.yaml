@@ -27,7 +27,8 @@ uniswap_v3_weth_usdc_005:
     0.05%, fee 500 en el contrato; GeckoTerminal lo lista como WETH/USDC 0.05%).
     Gas: 0.05 USD por pata, valor de la tabla anterior (dex_pool); es un supuesto
     fijo, no una lectura del precio del gas.
-# Tabla genérica de un pool del tier 0.30%. Ningún mercado la usa hoy.
+# Tabla genérica de un pool del tier 0.30%. Ningún mercado la usa hoy. La pata spot
+# de BTC del carry en papel (sombra, #31) la usa como supuesto conservador.
 dex_pool:
   taker_bps: 30
   min_fee_usd: 0

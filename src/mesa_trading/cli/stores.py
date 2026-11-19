@@ -10,6 +10,7 @@ from pathlib import Path
 from mesa_trading.book.store import FileBookStore
 from mesa_trading.logs.sink import FileLogSink, LogSink
 from mesa_trading.book.store import BookStore
+from mesa_trading.storage import DataRoot, GcsRoot, LocalRoot
 
 
 def open_logs(data_dir: str) -> LogSink:
@@ -26,3 +27,10 @@ def open_book(data_dir: str, capital: Decimal, now: datetime) -> BookStore:
 
         return GcsBookStore(os.environ["MESA_BUCKET"], capital, now)
     return FileBookStore(Path(data_dir) / "book", capital=capital, now=now)
+
+
+def open_root(data_dir: str) -> DataRoot:
+    """Bucket si hay MESA_BUCKET; si no, el mismo directorio de datos del tick."""
+    if os.environ.get("MESA_BUCKET"):
+        return GcsRoot(os.environ["MESA_BUCKET"])
+    return LocalRoot(Path(data_dir))

@@ -132,6 +132,75 @@ class RealMoneyConfig(BaseModel):
         return self
 
 
+class CarryConfig(BaseModel):
+    """Funding carry en papel (#31): spot largo + perp corto del mismo nocional."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    capital_usd: Decimal = Decimal("10000")
+    activos: list[str] = Field(default_factory=lambda: ["ETH", "BTC"])
+    # Tabla de config/fees.yaml para la pata spot de cada activo. La pata perp usa fee_perp.
+    fee_spot: dict[str, str] = Field(
+        default_factory=lambda: {"ETH": "uniswap_v3_weth_usdc_005", "BTC": "dex_pool"}
+    )
+    fee_perp: str = "hyperliquid_perp"
+    # Spread supuesto del spot (no hay libro spot): ~10 bp como el pool sintético.
+    spread_spot_bps: Decimal = Decimal("10")
+    # Liquidez supuesta para el impacto del deslizamiento de las dos patas.
+    liquidez_supuesta_usd: Decimal = Decimal("50000000")
+    extra_bps: Decimal = Decimal("1")
+    # Nocional de cada pata como fracción del equity del libro de carry.
+    nocional_pct: Decimal = Decimal("0.25")
+    # Horas de funding para el anualizado esperado (Hyperliquid paga cada hora).
+    ventana_funding_horas: int = 72
+    # Los costos de ida y vuelta se reparten en este horizonte para anualizarlos.
+    horizonte_dias: int = 30
+    # Entra solo si funding anualizado - costos anualizados > umbral.
+    umbral_neto_anual: Decimal = Decimal("0.05")
+    # Cierra si el funding medio de estas últimas horas es negativo.
+    horas_negativo_cierre: int = 24
+    # Cierra si la base (perp - spot) / spot se mueve más que esto desde la entrada.
+    limite_base: Decimal = Decimal("0.01")
+    descarte_dias: int = 30
+    descarte_min_pct_positivo: Decimal = Decimal("0.60")
+
+
+class TendenciaConfig(BaseModel):
+    """Tendencia diaria/4h en papel (#31). Perps de Hyperliquid, largo o corto."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    capital_usd: Decimal = Decimal("10000")
+    activos: list[str] = Field(default_factory=lambda: ["ETH", "BTC"])
+    fee_schedule: str = "hyperliquid_perp"
+    liquidez_supuesta_usd: Decimal = Decimal("50000000")
+    extra_bps: Decimal = Decimal("1")
+    # Riesgo por operación: nocional = riesgo_pct × equity / (distancia al stop / precio).
+    riesgo_pct: Decimal = Decimal("0.005")
+    # Señal: régimen por SMA de cierres diarios; entrada por ruptura Donchian en 4h.
+    sma_1d: int = 50
+    donchian_entrada_4h: int = 20
+    donchian_salida_4h: int = 10
+    atr_1d: int = 14
+    atr_mult_stop: Decimal = Decimal("2")
+    # Supuesto (no medido), igual que expected_edge_bps de gambler/house en policy.yaml.
+    expected_edge_bps: Decimal = Decimal("100")
+    descarte_operaciones: int = 20
+    descarte_dias: int = 60
+
+
+class SombraConfig(BaseModel):
+    """Estrategias en papel con libro propio. No tocan el libro de house/gambler."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    funding_historial_dias: int = 120
+    carry: CarryConfig = Field(default_factory=CarryConfig)
+    tendencia: TendenciaConfig = Field(default_factory=TendenciaConfig)
+
+
 class DeskConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, validate_assignment=True)
 
@@ -149,6 +218,7 @@ class DeskConfig(BaseModel):
     policy_version: int = 1
     data_retries: int = 2
     real_money: RealMoneyConfig = Field(default_factory=RealMoneyConfig)
+    sombra: SombraConfig = Field(default_factory=SombraConfig)
 
     @model_validator(mode="after")
     def required_bots(self) -> DeskConfig:
@@ -165,6 +235,9 @@ class DeskConfig(BaseModel):
         for name, market in self.markets.items():
             if market.venue == "coinbase":
                 raise ValueError(f"el mercado {name} no puede usar Coinbase")
+        # Sombra (#31): el mismo tope por posición que la mesa; no lo sube.
+        if self.sombra.carry.nocional_pct > self.risk.max_position_pct:
+            raise ValueError("sombra.carry.nocional_pct no puede pasar de risk.max_position_pct")
         return self
 
 

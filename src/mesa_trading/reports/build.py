@@ -495,6 +495,10 @@ def render_daily_md(report: dict) -> str:
         lines.append(f"- {reason}: {count}")
     lines.append("")
     lines.extend(render_cost_md(report.get("costos")))
+    if "sombra" in report:
+        from mesa_trading.sombra.reporte import render_md as render_sombra_md
+
+        lines.extend(render_sombra_md(report.get("sombra")))
     veredicto = report.get("veredicto")
     if veredicto:
         lines.append("## Veredicto de la estrategia")
