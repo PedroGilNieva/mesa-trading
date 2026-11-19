@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -51,13 +53,29 @@ class LocalRoot(DataRoot):
 
 
 class GcsRoot(DataRoot):
-    def __init__(self, bucket: str, token_provider=None) -> None:
+    # El token del metadata server dura ~1 h. Pedirlo en cada objeto duplicaba
+    # las llamadas HTTP de /decisiones/hoy; se reusa unos minutos.
+    TOKEN_TTL_S = 240.0
+
+    def __init__(self, bucket: str, token_provider=None, clock=None) -> None:
         self.bucket = bucket
         self.token_provider = token_provider or metadata_token
+        self._clock = clock or time.monotonic
+        self._token: tuple[float, str] | None = None
+        self._token_lock = threading.Lock()
+
+    def _bearer(self) -> str:
+        with self._token_lock:
+            now = self._clock()
+            if self._token is not None and now - self._token[0] < self.TOKEN_TTL_S:
+                return self._token[1]
+            token = self.token_provider()
+            self._token = (now, token)
+            return token
 
     def read_text(self, key: str) -> str | None:
         url = f"https://storage.googleapis.com/storage/v1/b/{self.bucket}/o/{_quote(key)}?alt=media"
-        status, body = _request("GET", url, self.token_provider())
+        status, body = _request("GET", url, self._bearer())
         if status == 404:
             return None
         if status != 200:
@@ -66,14 +84,14 @@ class GcsRoot(DataRoot):
 
     def write_text(self, key: str, text: str) -> None:
         url = f"https://storage.googleapis.com/upload/storage/v1/b/{self.bucket}/o?uploadType=media&name={_quote(key)}"
-        status, _body = _request("POST", url, self.token_provider(), text.encode("utf-8"), "application/json")
+        status, _body = _request("POST", url, self._bearer(), text.encode("utf-8"), "application/json")
         if status not in (200, 201):
             raise RuntimeError(f"no se pudo escribir {key}")
 
     def list_prefix(self, prefix: str, max_results: int | None = None) -> tuple[list[str], bool]:
         from mesa_trading.gcs import _list
 
-        return _list(self.bucket, prefix, self.token_provider(), max_results=max_results)
+        return _list(self.bucket, prefix, self._bearer(), max_results=max_results)
 
 
 def data_root_from_env() -> DataRoot:

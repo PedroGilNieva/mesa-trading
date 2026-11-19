@@ -102,6 +102,11 @@ class GcsBookStore(BookStore):
         payload = json.loads(body.decode("utf-8"))
         return BookState.model_validate(payload["state"]), int(generation or 0)
 
+    def kill_requested(self) -> bool:
+        token = self.token_provider()
+        body, _generation = _download(self.bucket, "book/kill", token)
+        return bool(body and body.strip())
+
     def write(self, state: BookState, expected_generation: int) -> bool:
         # Una escritura por ciclo, objeto distinto de la bitácora. El reintento
         # de un 429 vive dentro de _upload y espera más de un segundo.

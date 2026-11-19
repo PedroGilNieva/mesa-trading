@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -21,14 +22,24 @@ MAX_LOG_OBJECTS = 400
 CACHE_TTL_S = 300
 # Un fallo de lectura no se queda cinco minutos: se reintenta pronto.
 ERROR_TTL_S = 30
+# Un reporte que no alcanzó a leer todo no se guarda: la siguiente petición sigue leyendo.
+PARTIAL_TTL_S = 0
+# Lecturas en paralelo y tope de tiempo. Con ~300 ciclos al día y GCS a ~100 ms
+# por objeto, en serie eran ~60 s; así la petición sale en menos de 2 s.
+READ_WORKERS = 32
+READ_DEADLINE_S = 1.5
 # (store, fecha) -> (monotonic, reporte). Un golpe público no vuelve a listar el bucket.
 _CACHE: dict[tuple, tuple[float, dict]] = {}
+# (store, fecha) -> {objeto: renglones ya proyectados}. Un ciclo se sube una sola
+# vez, así que un objeto ya leído no se vuelve a bajar en el resto del día.
+_OBJECTS: dict[tuple, dict[str, list[dict]]] = {}
 _LOCKS: dict[tuple, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
 
 
 def clear_decision_cache() -> None:
     _CACHE.clear()
+    _OBJECTS.clear()
     with _LOCKS_GUARD:
         _LOCKS.clear()
 
@@ -45,6 +56,8 @@ def _lock_for(key: tuple) -> threading.Lock:
 def _ttl_for(found: tuple[float, dict] | None) -> float:
     if found is not None and found[1].get("lectura") == "no_disponible":
         return ERROR_TTL_S
+    if found is not None and found[1].get("parcial"):
+        return PARTIAL_TTL_S
     return CACHE_TTL_S
 
 
@@ -57,6 +70,7 @@ def _purge_other_days(today: str, keep: tuple) -> None:
         if key == keep or key[1] == today:
             continue
         _CACHE.pop(key, None)
+        _OBJECTS.pop(key, None)
         with _LOCKS_GUARD:
             _LOCKS.pop(key, None)
 
@@ -76,15 +90,16 @@ def cached_decision_report(store: DataRoot, now: datetime, policy: dict, *, now_
         found = _CACHE.get(key)
         if _fresh(found, clock):
             return found[1]
-        report = decision_report(store, now, policy)
+        report = decision_report(store, now, policy, memo=_OBJECTS.setdefault(key, {}))
         _CACHE[key] = (clock, report)
         _purge_other_days(day, key)
         return report
 
 
-def decision_report(store: DataRoot, now: datetime, policy: dict) -> dict:
+def decision_report(store: DataRoot, now: datetime, policy: dict, *, memo: dict[str, list[dict]] | None = None) -> dict:
+    partial = False
     try:
-        events, truncated = _events_for_cdmx_day(store, now)
+        events, truncated, partial = _events_for_cdmx_day(store, now, memo)
         lectura = "ok"
     except Exception:
         events, truncated, lectura = [], False, "no_disponible"
@@ -93,6 +108,8 @@ def decision_report(store: DataRoot, now: datetime, policy: dict) -> dict:
     summary["zona"] = "America/Mexico_City"
     summary["lectura"] = lectura
     summary["truncado"] = truncated
+    # True si el tope de tiempo cortó la lectura. La siguiente petición sigue donde se quedó.
+    summary["parcial"] = partial
     summary["nota"] = (
         "Solo lectura. Cuenta decisiones del día en Ciudad de México. "
         "No incluye respuestas del juez ni secretos y no cambia el modo."
@@ -256,7 +273,9 @@ def _blockers(event: dict, batteries: dict[tuple[str, str], dict], rules: dict) 
     return gambler_blockers(answers, rules)
 
 
-def _events_for_cdmx_day(store: DataRoot, now: datetime) -> tuple[list[dict], bool]:
+def _events_for_cdmx_day(
+    store: DataRoot, now: datetime, memo: dict[str, list[dict]] | None = None
+) -> tuple[list[dict], bool, bool]:
     start = as_utc(now).astimezone(CDMX).replace(hour=0, minute=0, second=0, microsecond=0)
     end = start + timedelta(days=1)
     names: list[str] = []
@@ -278,17 +297,48 @@ def _events_for_cdmx_day(store: DataRoot, now: datetime) -> tuple[list[dict], bo
         if cut:
             truncated = True
             break
+    memo = {} if memo is None else memo
+    names = names[:MAX_LOG_OBJECTS]
+    partial = _read_missing(store, [name for name in names if name not in memo], memo)
     rows: list[dict] = []
-    for name in names[:MAX_LOG_OBJECTS]:
-        text = store.read_text(name)
-        if not text:
-            continue
-        for event in _project_log(text):
+    for name in names:
+        for event in memo.get(name) or ():
             when = _when(event)
             if when is None or when < start or when >= end:
                 continue
             rows.append(event)
-    return rows, truncated
+    return rows, truncated, partial
+
+
+def _read_missing(store: DataRoot, names: list[str], memo: dict[str, list[dict]]) -> bool:
+    """Baja en paralelo lo que falta. Devuelve True si el tope de tiempo dejó objetos sin leer."""
+    if not names:
+        return False
+
+    def one(name: str) -> tuple[str, list[dict] | None]:
+        text = store.read_text(name)
+        # None es "no se pudo leer" (o un 5xx de GCS): no se memoriza y se reintenta.
+        return name, (None if text is None else _project_log(text))
+
+    pool = ThreadPoolExecutor(max_workers=min(READ_WORKERS, len(names)))
+    try:
+        futures = [pool.submit(one, name) for name in names]
+        done, pending = wait(futures, timeout=READ_DEADLINE_S)
+        failed = False
+        for future in done:
+            try:
+                name, rows = future.result()
+            except Exception:
+                failed = True
+                continue
+            if rows is None:
+                continue
+            memo[name] = rows
+        if failed and not memo:
+            raise RuntimeError("no se pudo leer la bitácora")
+        return bool(pending) or failed
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _project_log(text: str) -> list[dict]:
