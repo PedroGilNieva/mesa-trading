@@ -22,6 +22,8 @@ CDMX = ZoneInfo("America/Mexico_City")
 PAIR_ID_CAP = 10000
 # Misma barra que filtro_mudo: un hold suelto no es una mesa sin entradas.
 SIN_ENTRADAS_MIN_DECISIONES = 50
+# Cierre forzado con el último precio conocido porque no hubo datos de mercado.
+CIERRE_SIN_DATOS = "cierre_sin_datos"
 POLICY_QUESTIONS = {
     "gambler": ("regimen", "setup", "accion", "ejecucion_degradada"),
     "house": ("estado_rango", "flujo_toxico", "vale_cotizar", "hay_volumen"),
@@ -239,6 +241,7 @@ def evidence_snapshot(calibration: dict) -> dict:
             "threshold_version": number,
             "cuenta_como_evidencia": False,
             "cierres": 0,
+            "cierres_sin_datos": 0,
             "pnl_usd": "0",
             "desde": None,
             "drawdown_usd": "0",
@@ -247,6 +250,7 @@ def evidence_snapshot(calibration: dict) -> dict:
         "threshold_version": number,
         "cuenta_como_evidencia": True,
         "cierres": int(chosen.get("cierres") or 0),
+        "cierres_sin_datos": int(chosen.get("cierres_sin_datos") or 0),
         "pnl_usd": str(chosen.get("pnl_usd") or "0"),
         "desde": chosen.get("desde"),
         "drawdown_usd": str(chosen.get("drawdown_usd") or "0"),
@@ -268,6 +272,7 @@ def build_calibration(
             "cuenta_como_evidencia": bool(period.get("cuenta_como_evidencia")),
             "pnl_usd": str(period.get("pnl_usd") or "0"),
             "cierres": int(period.get("cierres") or 0),
+            "cierres_sin_datos": int(period.get("cierres_sin_datos") or 0),
             "desde": period.get("desde"),
             "drawdown_usd": str(period.get("drawdown_usd") or "0"),
             "preguntas": _score_questions(period.get("pares") or {}),
@@ -306,6 +311,7 @@ def build_daily(events: list[dict], config: DeskConfig, now: datetime, book: dic
     judge_status: dict[str, int] = defaultdict(int)
     fills = []
     pnl_por_bot: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    closes_by_reason: dict[str, int] = defaultdict(int)
     tokens = 0
     finished = 0
     halted = []
@@ -337,6 +343,7 @@ def build_daily(events: list[dict], config: DeskConfig, now: datetime, book: dic
             fills.append(row)
         elif kind == "PositionClosed":
             pnl_por_bot[event.get("bot") or "?"] += Decimal(str(payload.get("pnl_usd") or "0"))
+            closes_by_reason[str(payload.get("reason") or "sin_motivo")] += 1
         elif kind == "BatteryAnswered":
             judge_calls += 1
             judge_status["answered"] += 1
@@ -392,6 +399,11 @@ def build_daily(events: list[dict], config: DeskConfig, now: datetime, book: dic
         "operaciones_simuladas": fills,
         "pnl_por_bot": {bot: format(amount, "f") for bot, amount in pnl_por_bot.items()},
         "pnl_dia_usd": pnl_day,
+        "cierres_del_periodo": {
+            "total": int(sum(closes_by_reason.values())),
+            "cierre_sin_datos": int(closes_by_reason.get(CIERRE_SIN_DATOS, 0)),
+            "por_motivo": dict(closes_by_reason),
+        },
         "pnl_acumulado_usd": (book or {}).get("realized_pnl_usd", pnl_day),
         "drawdown_maximo_usd": (book or {}).get("drawdown_usd", "0"),
         "vetos_por_regla": dict(vetoes),
@@ -428,6 +440,7 @@ def render_daily_md(report: dict) -> str:
         "",
         f"Ciclos corridos: {report['ciclos']['corridos']} de {report['ciclos']['esperados']} esperados. Perdidos: {report['ciclos']['perdidos']}.",
         f"PnL del día (después de comisiones y slippage): {report['pnl_dia_usd']} USD.",
+        _closes_line(report),
         f"PnL acumulado: {report['pnl_acumulado_usd']} USD. Drawdown máximo: {report['drawdown_maximo_usd']} USD.",
         f"Gasto de Jev en el periodo: {report['gasto_jev_usd']:.6f} USD.",
         _cost_line(report),
@@ -484,6 +497,12 @@ def render_daily_md(report: dict) -> str:
     if veredicto:
         lines.append("## Veredicto de la estrategia")
         lines.append(f"Estado: {veredicto['estado']}.")
+        lines.append(
+            f"Contador: {veredicto['operaciones_cerradas']} de {veredicto['min_operaciones']} cierres, "
+            f"{veredicto['dias_observados']:.1f} de {veredicto['min_dias']} días."
+        )
+        if veredicto.get("cierres_sin_datos"):
+            lines.append(f"cierre_sin_datos (aparte): {veredicto['cierres_sin_datos']}.")
         lines.append(veredicto["nota"])
         lines.append("")
     lines.append("## Alertas")
@@ -494,6 +513,16 @@ def render_daily_md(report: dict) -> str:
     lines.append("")
     lines.append("Powered by CoinGecko (datos DEX, si el conector estuvo activo). Esto no es asesoría financiera.")
     return "\n".join(lines) + "\n"
+
+
+def _closes_line(report: dict) -> str:
+    closes = report.get("cierres_del_periodo") or {}
+    total = int(closes.get("total") or 0)
+    sin_datos = int(closes.get("cierre_sin_datos") or 0)
+    line = f"Cierres en el periodo: {total}."
+    if sin_datos:
+        line += f" De ellos, cierre_sin_datos (último precio conocido): {sin_datos}."
+    return line
 
 
 def render_calibration_md(report: dict) -> str:
@@ -676,6 +705,7 @@ def _blank_period(version: int | None, evidencia: bool) -> dict:
         "pares": {},
         "pnl_usd": "0",
         "cierres": 0,
+        "cierres_sin_datos": 0,
         "desde": None,
         "pnl_pico_usd": "0",
         "drawdown_usd": "0",
@@ -686,6 +716,7 @@ def _copy_period(body: dict) -> dict:
     period = _blank_period(body.get("threshold_version"), bool(body.get("cuenta_como_evidencia")))
     period["pnl_usd"] = str(body.get("pnl_usd") or "0")
     period["cierres"] = int(body.get("cierres") or 0)
+    period["cierres_sin_datos"] = int(body.get("cierres_sin_datos") or 0)
     period["desde"] = body.get("desde")
     period["pnl_pico_usd"] = str(body.get("pnl_pico_usd") or "0")
     period["drawdown_usd"] = str(body.get("drawdown_usd") or "0")
@@ -732,7 +763,7 @@ def _note_when(period: dict, when: str | None) -> None:
         period["desde"] = when
 
 
-def _add_close(period: dict, pnl: Decimal, when: str | None) -> None:
+def _add_close(period: dict, pnl: Decimal, when: str | None, reason: str | None = None) -> None:
     total = Decimal(str(period["pnl_usd"])) + pnl
     peak = Decimal(str(period["pnl_pico_usd"]))
     if total > peak:
@@ -747,6 +778,9 @@ def _add_close(period: dict, pnl: Decimal, when: str | None) -> None:
     period["pnl_pico_usd"] = format(peak, "f")
     period["drawdown_usd"] = format(worst, "f")
     period["cierres"] = int(period["cierres"]) + 1
+    if reason == CIERRE_SIN_DATOS:
+        # Cuenta como cierre, pero se reporta aparte: salió al último precio conocido.
+        period["cierres_sin_datos"] = int(period.get("cierres_sin_datos") or 0) + 1
     _note_when(period, when)
 
 
@@ -786,7 +820,12 @@ def update_pair_store(store: dict | None, events: list[dict]) -> dict:
             seen.add(key)
             current["ids"].append(key)
             period = _touch_period(current, payload)
-            _add_close(period, Decimal(str(payload.get("pnl_usd") or "0")), event.get("occurred_at"))
+            _add_close(
+                period,
+                Decimal(str(payload.get("pnl_usd") or "0")),
+                event.get("occurred_at"),
+                payload.get("reason"),
+            )
             continue
         if kind != "BatteryAnswered":
             continue
@@ -816,6 +855,50 @@ def update_pair_store(store: dict | None, events: list[dict]) -> dict:
     return current
 
 
+def book_sample(book: dict | None, now: datetime) -> dict:
+    """Muestra del libro (el mismo que lee /estado): cierres y días desde el inicio.
+
+    El día de trading corta a medianoche de Ciudad de México. Un libro que
+    empezó a las 23:30 CDMX ya va en su segundo día a las 00:00 CDMX.
+    """
+    state = book or {}
+    cierres = int(state.get("closed_trades") or 0)
+    raw_reasons = state.get("closed_by_reason") or {}
+    por_motivo = {str(key): int(value or 0) for key, value in raw_reasons.items() if int(value or 0) > 0}
+    registrados = sum(por_motivo.values())
+    if cierres > registrados:
+        # Cierres de antes de llevar la cuenta por motivo.
+        por_motivo["sin_motivo_registrado"] = por_motivo.get("sin_motivo_registrado", 0) + cierres - registrados
+    started_at = state.get("started_at")
+    dias = 0.0
+    dias_cdmx = 0
+    inicio_cdmx = None
+    if started_at:
+        started = as_utc(datetime.fromisoformat(str(started_at).replace("Z", "+00:00")))
+        moment = as_utc(now)
+        dias = max((moment - started).total_seconds() / 86400, 0.0)
+        start_day = started.astimezone(CDMX).date()
+        today = moment.astimezone(CDMX).date()
+        inicio_cdmx = start_day.isoformat()
+        dias_cdmx = max((today - start_day).days + 1, 0)
+    return {
+        "cierres": cierres,
+        "cierres_sin_datos": int(por_motivo.get(CIERRE_SIN_DATOS, 0)),
+        "cierres_por_motivo": por_motivo,
+        "desde": started_at,
+        "inicio_cdmx": inicio_cdmx,
+        "dias": dias,
+        "dias_de_trading_cdmx": dias_cdmx,
+    }
+
+
+def _days_since(started_at: str | None, now: datetime) -> float:
+    if not started_at:
+        return 0.0
+    started = as_utc(datetime.fromisoformat(str(started_at).replace("Z", "+00:00")))
+    return max((as_utc(now) - started).total_seconds() / 86400, 0.0)
+
+
 def apply_verdict(
     daily: dict,
     calibration: dict,
@@ -827,8 +910,14 @@ def apply_verdict(
     max_drawdown_usd: Decimal,
     now: datetime,
     pnl_usd: Decimal | None = None,
+    book: dict | None = None,
 ) -> dict:
-    """Go / no-go de la estrategia. No cambia el modo de ningún bot."""
+    """Go / no-go de la estrategia. No cambia el modo de ningún bot.
+
+    closed_trades y started_at son la evidencia del GO (solo el periodo que
+    cuenta). `book` es la muestra del libro (book_sample): mueve el contador
+    hacia la muestra aunque el periodo actual no cuente como evidencia.
+    """
     skills = []
     for bot, policy_qids in POLICY_QUESTIONS.items():
         questions = (calibration.get("preguntas") or {}).get(bot) or {}
@@ -837,12 +926,23 @@ def apply_verdict(
             if skill_value is not None:
                 skills.append(float(skill_value))
     min_skill = min(skills) if skills else None
-    days = 0.0
-    if started_at:
-        started = as_utc(datetime.fromisoformat(started_at.replace("Z", "+00:00")))
-        days = max((as_utc(now) - started).total_seconds() / 86400, 0.0)
-    rate = (closed_trades / days) if days >= 1 / 24 and closed_trades else 0.0
-    remaining = max(int(promo.min_closed_trades) - int(closed_trades), 0)
+    evidence_days = _days_since(started_at, now)
+    if book is None:
+        sample = {
+            "cierres": int(closed_trades),
+            "cierres_sin_datos": int(evidence_snapshot(calibration).get("cierres_sin_datos") or 0),
+            "cierres_por_motivo": {},
+            "desde": started_at,
+            "inicio_cdmx": None,
+            "dias": evidence_days,
+            "dias_de_trading_cdmx": None,
+        }
+    else:
+        sample = book
+    counted = int(sample["cierres"])
+    days = float(sample["dias"])
+    rate = (counted / days) if days >= 1 / 24 and counted else 0.0
+    remaining = max(int(promo.min_closed_trades) - counted, 0)
     days_left = (remaining / rate) if rate > 0 else None
     # El PnL del diario mezcla periodos. Sin uno explícito se usa el del snapshot,
     # que es cero cuando el periodo más nuevo no cuenta como evidencia.
@@ -852,7 +952,8 @@ def apply_verdict(
     # El corte usa el peor pico-a-valle guardado, no el hueco que queda ahora
     # si el capital ya rebotó.
     drawdown_pct = (max_drawdown_usd / capital_usd) if capital_usd else Decimal("0")
-    sample_ok = closed_trades >= promo.min_closed_trades and days >= promo.min_shadow_days
+    # El GO solo ve la evidencia; el libro solo mueve el contador.
+    sample_ok = closed_trades >= promo.min_closed_trades and evidence_days >= promo.min_shadow_days
     skill_ok = min_skill is not None and min_skill >= float(promo.min_brier_skill)
     pnl_ok = pnl > promo.min_pnl_usd
     drawdown_hit = drawdown_pct > promo.max_drawdown_pct
@@ -876,9 +977,26 @@ def apply_verdict(
             "Todavía no hay ritmo de cierres. Con una sola posición, unas 10 operaciones al día "
             f"juntan {promo.min_closed_trades} en ~20 días; unas 2 al día, en ~100 días."
         )
+    sin_datos = int(sample.get("cierres_sin_datos") or 0)
+    muestra = (
+        f"Muestra del libro: {counted} cierres en {days:.1f} días (mínimo {promo.min_closed_trades} cierres "
+        f"y {promo.min_shadow_days} días)"
+    )
+    if sample.get("dias_de_trading_cdmx") is not None:
+        muestra += f", día de trading {sample['dias_de_trading_cdmx']} en hora de Ciudad de México"
+    muestra += ". "
+    if sin_datos:
+        muestra += (
+            f"De esos, {sin_datos} fueron cierre_sin_datos (cerrados con el último precio conocido); "
+            "cuentan, pero se marcan aparte. "
+        )
+    if book is not None:
+        muestra += (
+            f"Cuentan como evidencia para el GO: {int(closed_trades)} cierres en {evidence_days:.1f} días. "
+        )
     nota = (
-        f"Muestra: {closed_trades} cierres en {days:.1f} días (mínimo {promo.min_closed_trades} cierres "
-        f"y {promo.min_shadow_days} días). PnL acumulado después de comisiones y slippage: {pnl} USD. "
+        muestra
+        + f"PnL acumulado después de comisiones y slippage: {pnl} USD. "
         f"Skill mínimo de Brier en preguntas de política: {min_skill}. "
         f"Drawdown máximo: {drawdown_pct * 100:.2f}% del capital (corte {promo.max_drawdown_pct * 100:.0f}%). "
         f"{ritmo} "
@@ -889,10 +1007,17 @@ def apply_verdict(
     )
     daily["veredicto"] = {
         "estado": estado,
-        "operaciones_cerradas": int(closed_trades),
+        "operaciones_cerradas": counted,
+        "cierres_sin_datos": sin_datos,
+        "cierres_por_motivo": dict(sample.get("cierres_por_motivo") or {}),
         "min_operaciones": int(promo.min_closed_trades),
         "dias_observados": round(days, 2),
+        "dias_de_trading_cdmx": sample.get("dias_de_trading_cdmx"),
+        "inicio": sample.get("desde"),
+        "inicio_cdmx": sample.get("inicio_cdmx"),
         "min_dias": int(promo.min_shadow_days),
+        "operaciones_cerradas_evidencia": int(closed_trades),
+        "dias_evidencia": round(evidence_days, 2),
         "cierres_por_dia": None if rate <= 0 else round(rate, 3),
         "dias_estimados_para_muestra": None if days_left is None else round(days_left, 1),
         "pnl_acumulado_usd": format(pnl, "f"),

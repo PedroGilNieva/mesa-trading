@@ -633,7 +633,7 @@ def _close(env, state, cycle_id, now, mode, reason, snapshot, book=None) -> int:
     if not fills:
         return 0
     fill = fills[-1]
-    pnl = close_position(state, fill.price, fill.fee_usd, fill.slippage_usd, fill.filled_at)
+    pnl = close_position(state, fill.price, fill.fee_usd, fill.slippage_usd, fill.filled_at, reason=reason)
     state.seen_orders.append(order.client_order_id)
     state.last_prices[pos.market] = str(fill.price)
     _remember_fill(

@@ -116,6 +116,9 @@ class BookState(BaseModel):
     last_cycle_id: str | None = None
     last_cycle_at: str | None = None
     closed_trades: int = 0
+    # Cierres por motivo (p. ej. cierre_sin_datos). Los libros viejos no lo traen;
+    # la diferencia con closed_trades se reporta como sin_motivo_registrado.
+    closed_by_reason: dict[str, int] = Field(default_factory=dict)
     started_at: str | None = None
     max_drawdown_usd: Decimal = Decimal("0")
     # Los últimos fills, para /estado, sin releer la bitácora.
