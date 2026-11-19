@@ -1,21 +1,45 @@
-# Comisiones por plataforma. El caso del artículo (mínimo 0.95 USD) vive en dex_minimo.
+# Comisiones por plataforma o por pool. Cada mercado de config/desk.yaml elige una
+# tabla con `fee_schedule`. El caso del artículo (mínimo 0.95 USD) vive en dex_minimo.
+#
+# Campos: taker_bps (por pata), min_fee_usd (reemplaza a la parte porcentual si es
+# mayor), gas_usd (fijo por pata, se cobra en cada fill) y fuente (de dónde sale).
 coinbase_spot:
   taker_bps: 60
   min_fee_usd: 0
   gas_usd: 0
+  fuente: "Conector de Coinbase apagado; ningún mercado lo usa."
 hyperliquid_perp:
   taker_bps: 4.5
   min_fee_usd: 0
   gas_usd: 0
+  fuente: >-
+    Taker del nivel base de perps de Hyperliquid (0.045%). Sin gas: el fill es en
+    el libro de órdenes de Hyperliquid, no una transacción on-chain por orden.
+# Pool WETH/USDC 0.05% de Uniswap v3 en Ethereum (0x88e6a0c2...5640, ver
+# docs/fuentes.md). El tier del pool es su comisión: 500 = 0.05% = 5 bps sobre lo
+# que entra al swap. Es fijo por contrato; no lo cobra un tercero.
+uniswap_v3_weth_usdc_005:
+  taker_bps: 5
+  min_fee_usd: 0
+  gas_usd: 0.05
+  fuente: >-
+    Tier del pool 0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640 (Uniswap v3 USDC/WETH
+    0.05%, fee 500 en el contrato; GeckoTerminal lo lista como WETH/USDC 0.05%).
+    Gas: 0.05 USD por pata, valor de la tabla anterior (dex_pool); es un supuesto
+    fijo, no una lectura del precio del gas.
+# Tabla genérica de un pool del tier 0.30%. Ningún mercado la usa hoy.
 dex_pool:
   taker_bps: 30
   min_fee_usd: 0
   gas_usd: 0.05
+  fuente: "Tier genérico 0.30% de un pool tipo Uniswap; 0.05 USD de gas por pata. Ningún mercado la usa."
 dex_minimo:
   taker_bps: 0
   min_fee_usd: 0.95
   gas_usd: 0
+  fuente: "Caso de comisión mínima de 0.95 USD; ningún mercado lo usa."
 default:
   taker_bps: 60
   min_fee_usd: 0
   gas_usd: 0
+  fuente: "Respaldo; ningún mercado lo usa."

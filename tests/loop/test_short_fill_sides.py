@@ -35,7 +35,7 @@ def test_short_open_and_close_keep_both_sides(tmp_path):
     assert state.position is not None
     entry = state.position.entry_price
     open_fee = state.position.fees_usd
-    open_slip = state.position.slippage_usd
+    assert state.position.slippage_usd > 0  # anotado, pero ya dentro del precio de entrada
     qty = state.position.qty
 
     judge.response = _answers({"largo": "0.1", "corto": "0.1", "hold": "0.8"}, trend="0.1")
@@ -51,7 +51,8 @@ def test_short_open_and_close_keep_both_sides(tmp_path):
     assert fill["side"] == "short"
     assert fill["order_side"] == "buy"
     gross = (entry - Decimal(fill["price"])) * qty
-    expected = gross - Decimal(fill["fee_usd"]) - Decimal(fill["slippage_usd"]) - open_fee - open_slip
+    # El deslizamiento ya está en los precios de los fills: no se resta otra vez (#29).
+    expected = gross - Decimal(fill["fee_usd"]) - open_fee
     assert Decimal(fill["pnl_usd"]) == expected
     assert Decimal(closed["pnl_usd"]) == expected
     assert state.realized_pnl_usd == expected

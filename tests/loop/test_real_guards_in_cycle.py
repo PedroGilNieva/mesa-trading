@@ -77,7 +77,10 @@ def test_daily_loss_limit_blocks_new_orders_for_the_rest_of_the_cdmx_day(tmp_pat
 
 def test_a_smaller_loss_does_not_stop_the_desk(tmp_path, armed):
     env = _env(tmp_path)
-    _lose(env, "9.99")
+    # La entrada de este ciclo cuesta ~0.011 USD de comisión en equity. Desde #29 la
+    # entrada sale del cash al precio del fill (con el medio spread), así que 9.99 + 0.011
+    # ya cruzaría 10. 9.98 deja la pérdida debajo del tope, que es lo que se prueba.
+    _lose(env, "9.98")
     result = run_cycle(env, "20261106T120000Z", T0)
     assert result["orders"] == 1
     state, _gen = env.book.read()

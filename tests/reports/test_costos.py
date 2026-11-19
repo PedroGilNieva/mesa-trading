@@ -108,9 +108,11 @@ def test_round_trip_splits_gross_fees_and_slippage(tmp_path):
     assert Decimal(trade["comisiones_usd"]) == fees.quantize(Decimal("0.0001"))
     assert Decimal(trade["deslizamiento_usd"]) == slips.quantize(Decimal("0.0001"))
     assert Decimal(trade["neto_usd"]) == (price_move - fees).quantize(Decimal("0.0001"))
-    # El libro resta el deslizamiento otra vez: queda exactamente esa diferencia.
+    # Desde #29 el libro cobra el deslizamiento una sola vez: pnl_libro = neto.
     assert Decimal(trade["pnl_libro_usd"]) == state.realized_pnl_usd.quantize(Decimal("0.0001"))
-    assert Decimal(trade["neto_usd"]) - Decimal(trade["pnl_libro_usd"]) == Decimal(trade["deslizamiento_usd"])
+    assert trade["pnl_libro_usd"] == trade["neto_usd"]
+    assert trade["contabilidad"] == 2
+    assert trade["gas_usd"] == "0.0000"  # perps: sin gas
     assert trade["motivo_entrada"] == "entrada"
     assert trade["observados"]["accion_p"]
     assert trade["umbrales"]["accion_min_p"]
@@ -139,7 +141,10 @@ def test_book_view_leaves_open_position_costs_out():
     assert view["deslizamiento_usd"] == "0.2000"
     assert view["pnl_neto_usd"] == "-0.8000"
     assert view["pnl_bruto_usd"] == "-0.1000"
-    assert view["costos_posicion_abierta_usd"] == {"comisiones": "0.4000", "deslizamiento": "0.1000"}
+    # Libro de antes de #29 (sin slippage_double_counted_legacy_usd): todo el deslizamiento
+    # cerrado se contó dos veces.
+    assert view["deslizamiento_doble_contado_usd"] == "0.2000"
+    assert view["costos_posicion_abierta_usd"] == {"comisiones": "0.4000", "deslizamiento": "0.1000", "gas": "0.0000"}
 
 
 # --- eventos viejos, sin cantidad ---------------------------------------------------------
@@ -242,11 +247,15 @@ def test_fee_model_splits_fixed_and_percentage_parts():
     assert perp["comision_ida_y_vuelta_usd"] == "0.2250"
     assert perp["parte_fija_por_pata_usd"] == "0.0000"
     assert "BTC-PERP" in perp["mercados"]
-    pool = model["tablas"]["dex_pool"]
-    assert pool["comision_ida_y_vuelta_usd"] == "1.5000"
-    assert pool["gas_fijo_por_operacion_usd"] == "0.0500"
-    assert pool["gas_cobrado_en_libro"] is False
+    pool = model["tablas"]["uniswap_v3_weth_usdc_005"]
+    assert pool["porcentual_bps"] == "5.00"
+    assert pool["comision_ida_y_vuelta_usd"] == "0.2500"
+    assert pool["gas_por_pata_usd"] == "0.0500"
+    assert pool["gas_ida_y_vuelta_usd"] == "0.1000"
+    assert pool["gas_cobrado_en_libro"] is True
     assert pool["mercados"] == ["WETH-USDC"]
+    assert "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640" in pool["fuente"]
+    assert model["tablas"]["dex_pool"]["mercados"] == []
     minimum = model["tablas"]["dex_minimo"]
     assert minimum["parte_fija_por_pata_usd"] == "0.9500"
     assert minimum["parte_porcentual_por_pata_usd"] == "0.0000"

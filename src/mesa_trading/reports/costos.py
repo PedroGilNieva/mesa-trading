@@ -1,23 +1,30 @@
-"""PnL bruto vs. neto y costo por operación (issue #26).
+"""PnL bruto vs. neto y costo por operación (issues #26 y #29).
 
-Solo mide. No cambia la estrategia, los umbrales, el tamaño ni la contabilidad
-del libro. Todo el dinero es simulado.
+Solo mide. No cambia la estrategia, los umbrales ni el tamaño. Todo el dinero
+es simulado.
 
 Definiciones, por operación cerrada (entrada + salida):
 
 - ``P``: diferencia de precio entre los dos fills, por la cantidad. El
-  SimBroker ya mete el deslizamiento en el precio del fill (compra más caro,
+  SimBroker mete el deslizamiento en el precio del fill (compra más caro,
   vende más barato), así que ``P`` ya trae el deslizamiento restado una vez.
 - bruto = ``P`` + deslizamiento de entrada + deslizamiento de salida. Es el
-  resultado antes de comisiones y deslizamiento.
-- neto = bruto - comisiones - deslizamiento = ``P`` - comisiones.
-- pnl_libro = lo que guarda el libro (``close_position``). Resta el
-  deslizamiento otra vez sobre ``P``, así que hoy pnl_libro = neto -
-  deslizamiento. La diferencia sale aparte en el reporte; aquí no se corrige.
+  resultado antes de comisiones, gas y deslizamiento.
+- neto = bruto - comisiones - deslizamiento - gas = ``P`` - comisiones - gas.
+- pnl_libro = lo que guarda el libro (``close_position``).
+  - Cierres con ``contabilidad`` = 2 (desde #29): pnl_libro = neto. El
+    deslizamiento se cobra una sola vez y el gas se cobra por pata.
+  - Cierres viejos (sin ``contabilidad``): el libro restaba el deslizamiento
+    otra vez sobre ``P`` y no cobraba gas, así que pnl_libro = neto -
+    deslizamiento. Esa diferencia sale como ``deslizamiento_doble_contado_usd``.
+    No se reescribe el libro.
 
-Si el cierre no trae la cantidad (eventos de antes de este cambio), ``P`` se
-reconstruye con la misma identidad del libro: ``P`` = pnl_libro + comisiones +
-deslizamiento.
+Si el cierre no trae la cantidad (eventos de antes de #26), ``P`` se
+reconstruye con la identidad del libro de ese cierre.
+
+``recalculo_tabla_actual`` es un reporte aparte: vuelve a calcular las
+operaciones guardadas con la contabilidad y la tabla de comisiones de hoy. No
+toca el libro.
 """
 
 from __future__ import annotations
@@ -45,22 +52,11 @@ ENTRY_ACTIONS = ("long", "short", "quote")
 ZERO = Decimal("0")
 BPS = Decimal("10000")
 
-# De dónde sale cada tarifa de config/fees.yaml. El archivo no cita fuentes; lo
-# de abajo es lo que se puede afirmar desde el repositorio y lo que es inferencia.
-FUENTES_COMISIONES = {
-    "hyperliquid_perp": (
-        "config/fees.yaml. 4.5 bps coincide con el taker del nivel base de perps de "
-        "Hyperliquid (0.045%); no se verificó contra su página de comisiones en esta corrida."
-    ),
-    "dex_pool": (
-        "config/fees.yaml. 30 bps es la tarifa genérica del nivel 0.30% de un pool tipo Uniswap; "
-        "0.05 USD de gas fijo. El pool configurado (WETH/USDC en Ethereum, docs/fuentes.md) es el "
-        "de 0.05% (5 bps): el simulador cobra 6 veces la tarifa de ese pool."
-    ),
-    "coinbase_spot": "config/fees.yaml. Conector de Coinbase apagado; ningún mercado lo usa.",
-    "dex_minimo": "config/fees.yaml. Caso de comisión mínima de 0.95 USD; ningún mercado lo usa.",
-    "default": "config/fees.yaml. Respaldo; ningún mercado lo usa.",
-}
+# La fuente de cada tarifa vive en config/fees.yaml (campo ``fuente``). Esto es
+# solo el respaldo para una tabla que no la trae.
+FUENTE_SIN_CITA = "config/fees.yaml (la tabla no cita fuente)"
+# Versión de la contabilidad del libro en la que pnl_libro = neto (#29).
+CONTABILIDAD_CORREGIDA = 2
 
 # Umbrales de entrada que se pueden endurecer y la medida que comparan.
 # (llave del umbral, medida observada, sentido, paso). Sentido ">=" exige
@@ -129,6 +125,7 @@ def trades_from_events(
                     "notional_usd": payload.get("notional_usd"),
                     "fee_usd": payload.get("fee_usd"),
                     "slippage_usd": payload.get("slippage_usd"),
+                    "gas_usd": payload.get("gas_usd"),
                     "motivo": decision.get("reason") or "",
                     "observados": dict(decision.get("observados") or {}),
                     "umbrales": {k: str(v) for k, v in (decision.get("thresholds") or {}).items()},
@@ -149,6 +146,12 @@ def _trade(event: dict, payload: dict, bot: str, entry: dict | None) -> dict:
     slip_in = slip_in or ZERO
     fees = fee_in + fee_out
     slips = slip_in + slip_out
+    # Antes de #29 el libro no cobraba gas: en esos cierres el gas cobrado es 0.
+    contabilidad = int(_d(payload.get("contabilidad")) or 1)
+    corregida = contabilidad >= CONTABILIDAD_CORREGIDA
+    gas_in = _first_d(payload.get("entry_gas_usd"), entry.get("gas_usd")) if corregida else None
+    gas_out = _d(payload.get("gas_usd")) if corregida else ZERO
+    gas = (gas_in or ZERO) + gas_out
     exit_price = _first_d(payload.get("price"))
     entry_price = _first_d(payload.get("entry_price"), entry.get("price"))
     qty = _first_d(payload.get("qty"), payload.get("entry_qty"), entry.get("qty"))
@@ -156,12 +159,16 @@ def _trade(event: dict, payload: dict, bot: str, entry: dict | None) -> dict:
         move = (exit_price - entry_price) * qty
         price_move = move if side == "long" else -move
         fuente = "precios"
+    elif corregida:
+        # Identidad de close_position desde #29: pnl = P - comisiones - gas.
+        price_move = pnl_libro + fees + gas
+        fuente = "identidad_libro"
     else:
-        # Misma identidad que close_position: pnl = P - comisiones - deslizamiento.
+        # Identidad vieja de close_position: pnl = P - comisiones - deslizamiento.
         price_move = pnl_libro + fees + slips
         fuente = "identidad_libro"
     bruto = price_move + slips
-    neto = bruto - fees - slips
+    neto = bruto - fees - slips - gas
     nocional = _first_d(payload.get("entry_notional_usd"), entry.get("notional_usd")) or ZERO
     closed_at = event.get("occurred_at") or ""
     return {
@@ -181,8 +188,10 @@ def _trade(event: dict, payload: dict, bot: str, entry: dict | None) -> dict:
         "comision_salida_usd": _s(fee_out),
         "comisiones_usd": _s(fees),
         "deslizamiento_usd": _s(slips),
+        "gas_usd": _s(gas),
         "neto_usd": _s(neto),
         "pnl_libro_usd": _s(pnl_libro),
+        "contabilidad": contabilidad,
         "entrada_conocida": entry_known,
         "fuente_bruto": fuente,
         "observados": dict(entry.get("observados") or {}),
@@ -201,6 +210,7 @@ def _blank() -> dict[str, Any]:
         "bruto": ZERO,
         "comisiones": ZERO,
         "deslizamiento": ZERO,
+        "gas": ZERO,
         "neto": ZERO,
         "pnl_libro": ZERO,
         "ganadoras_bruto": 0,
@@ -216,6 +226,7 @@ def _add(acc: dict, trade: dict) -> None:
     acc["bruto"] += bruto
     acc["comisiones"] += _d(trade.get("comisiones_usd"))
     acc["deslizamiento"] += _d(trade.get("deslizamiento_usd"))
+    acc["gas"] += _d(trade.get("gas_usd"))
     acc["neto"] += neto
     acc["pnl_libro"] += _d(trade.get("pnl_libro_usd"))
     acc["ganadoras_bruto"] += 1 if bruto > 0 else 0
@@ -230,12 +241,14 @@ def _merge(acc: dict, other: dict) -> None:
 def stats(acc: dict) -> dict:
     """Totales y promedios por operación. Montos en USD, tasas en bps del nocional."""
     count = int(acc["operaciones"])
-    costos = acc["comisiones"] + acc["deslizamiento"]
+    gas = acc.get("gas", ZERO)
+    costos = acc["comisiones"] + acc["deslizamiento"] + gas
     out = {
         "operaciones": count,
         "pnl_bruto_usd": _s(acc["bruto"]),
         "comisiones_usd": _s(acc["comisiones"]),
         "deslizamiento_usd": _s(acc["deslizamiento"]),
+        "gas_usd": _s(gas),
         "costos_usd": _s(costos),
         "pnl_neto_usd": _s(acc["neto"]),
         "pnl_libro_usd": _s(acc["pnl_libro"]),
@@ -278,23 +291,28 @@ def summarize(trades: Iterable[dict], key=lambda trade: trade.get("bot") or "?")
 def update_cost_store(store: dict | None, events: list[dict]) -> tuple[dict, list[dict]]:
     """Suma las operaciones nuevas una sola vez. Devuelve (estado, nuevas)."""
     current = {
-        "version": 1,
+        "version": 2,
         "desde": None,
         "abiertas": {},
         "operaciones": [],
         "dias": {},
+        "dias_mercado": None,
     }
     if store:
-        current.update({key: store[key] for key in current if key in store})
+        current.update({key: store[key] for key in current if key in store and key != "version"})
+    if current["dias_mercado"] is None:
+        # Estado de antes de #29: los totales por mercado salen del detalle guardado
+        # (hasta TRADE_CAP operaciones; las más viejas que eso ya no están).
+        current["dias_mercado"] = {}
+        for trade in current["operaciones"]:
+            _bump_day(current["dias_mercado"], trade, trade.get("market") or "?")
     trades, open_entries = trades_from_events(events, current.get("abiertas"))
     known = {trade["id"] for trade in current["operaciones"]}
     fresh = [trade for trade in trades if trade["id"] not in known]
     dias = current["dias"]
     for trade in fresh:
-        day = dias.setdefault(trade["dia"], {})
-        acc = _from_json(day.get(trade["bot"]))
-        _add(acc, trade)
-        day[trade["bot"]] = _to_json(acc)
+        _bump_day(dias, trade, trade["bot"])
+        _bump_day(current["dias_mercado"], trade, trade.get("market") or "?")
         if current["desde"] is None or trade["cerrada_en"] < current["desde"]:
             current["desde"] = trade["cerrada_en"]
     operaciones = current["operaciones"] + fresh
@@ -302,6 +320,44 @@ def update_cost_store(store: dict | None, events: list[dict]) -> tuple[dict, lis
     current["operaciones"] = operaciones[-TRADE_CAP:]
     current["abiertas"] = open_entries
     return current, fresh
+
+
+def _bump_day(dias: dict, trade: dict, key: str) -> None:
+    day = dias.setdefault(trade.get("dia") or "?", {})
+    acc = _from_json(day.get(key))
+    _add(acc, trade)
+    day[key] = _to_json(acc)
+
+
+def market_type(config: DeskConfig | None, market: str) -> str:
+    """dex o perps (o el kind del mercado si no es ninguno de los dos)."""
+    spec = config.markets.get(market) if config is not None else None
+    if spec is None:
+        return "perps" if market.upper().endswith("-PERP") else "?"
+    if spec.kind == "perp":
+        return "perps"
+    if spec.venue == "geckoterminal" or "dex" in spec.fee_schedule or spec.fee_schedule.startswith("uniswap"):
+        return "dex"
+    return spec.kind
+
+
+def by_market_type(trades: Iterable[dict], config: DeskConfig | None) -> dict:
+    """Por tipo de mercado (dex / perps): total y cada mercado."""
+    groups: dict[str, dict[str, dict]] = defaultdict(lambda: defaultdict(_blank))
+    for trade in trades:
+        market = trade.get("market") or "?"
+        _add(groups[market_type(config, market)][market], trade)
+    return _type_view(groups)
+
+
+def _type_view(groups: dict[str, dict[str, dict]]) -> dict:
+    out = {}
+    for tipo, markets in sorted(groups.items()):
+        total = _blank()
+        for acc in markets.values():
+            _merge(total, acc)
+        out[tipo] = {"total": stats(total), "por_mercado": {m: stats(acc) for m, acc in sorted(markets.items())}}
+    return out
 
 
 def backfill_start(store: dict | None, book_started_at: str | None, now: datetime) -> datetime:
@@ -322,38 +378,81 @@ def backfill_start(store: dict | None, book_started_at: str | None, now: datetim
 # Lo que se ve desde el libro (sin bitácora): sirve en /estado en vivo
 
 
-def book_cost_view(state: dict | None) -> dict:
-    """Bruto, comisiones, deslizamiento y neto acumulados, de todas las estrategias.
+def book_cost_view(state: dict | None, config: DeskConfig | None = None) -> dict:
+    """Bruto, comisiones, deslizamiento, gas y neto acumulados, de todas las estrategias.
 
-    Sale solo de book/state.json. Las comisiones y el deslizamiento de la
-    posición abierta se quitan: todavía no entran al PnL realizado.
+    Sale solo de book/state.json. Los costos de la posición abierta se quitan:
+    todavía no entran al PnL realizado.
+
+    El realizado del libro no se reescribe. Las operaciones cerradas antes de
+    #29 restaron el deslizamiento dos veces; ese monto queda congelado en
+    ``slippage_double_counted_legacy_usd`` y se suma de vuelta para el neto. Un
+    libro que aún no pasó por la contabilidad nueva (sin ese campo) tiene todo
+    su deslizamiento cerrado contado dos veces.
     """
     state = state or {}
     position = state.get("position") or {}
     fees = _d(state.get("fees_usd")) - _d(position.get("fees_usd"))
     slips = _d(state.get("slippage_usd")) - _d(position.get("slippage_usd"))
+    gas = _d(state.get("gas_usd")) - _d(position.get("gas_usd"))
     libro = _d(state.get("realized_pnl_usd"))
-    # Contabilidad actual del libro: pnl_libro = neto - deslizamiento.
-    neto = libro + slips
-    bruto = neto + fees + slips
+    legacy = state.get("slippage_double_counted_legacy_usd")
+    doble = slips if legacy is None else _d(legacy)
+    neto = libro + doble
+    bruto = neto + fees + slips + gas
     return {
         "operaciones_cerradas": int(state.get("closed_trades") or 0),
         "pnl_bruto_usd": _s(bruto),
         "comisiones_usd": _s(fees),
         "deslizamiento_usd": _s(slips),
+        "gas_usd": _s(gas),
         "pnl_neto_usd": _s(neto),
         "pnl_libro_usd": _s(libro),
-        "deslizamiento_doble_contado_usd": _s(slips),
+        "deslizamiento_doble_contado_usd": _s(doble),
         "costos_posicion_abierta_usd": {
             "comisiones": _s(_d(position.get("fees_usd"))),
             "deslizamiento": _s(_d(position.get("slippage_usd"))),
+            "gas": _s(_d(position.get("gas_usd"))),
         },
+        "por_tipo_mercado": book_costs_by_type(state, config),
         "nota": (
-            "Acumulado del libro, todas las estrategias. neto = bruto - comisiones - deslizamiento. "
-            "pnl_libro es el realizado que guarda el libro hoy: resta el deslizamiento dos veces "
-            "(una en el precio del fill y otra en close_position)."
+            "Acumulado del libro, todas las estrategias. neto = bruto - comisiones - deslizamiento - gas. "
+            "pnl_libro es el realizado que guarda el libro; desde #29 cobra el deslizamiento una vez y el gas. "
+            "deslizamiento_doble_contado_usd es lo que las operaciones de antes de #29 restaron de más: "
+            "neto = pnl_libro + ese monto. El libro no se reescribe."
         ),
     }
+
+
+def book_costs_by_type(state: dict | None, config: DeskConfig | None = None) -> dict:
+    """Comisiones, deslizamiento y gas por tipo de mercado (dex / perps), en vivo.
+
+    Sale de ``costs_by_market`` del libro: cuenta desde #29 y cada pata
+    (entrada o salida), incluida la entrada de la posición abierta.
+    """
+    raw = (state or {}).get("costs_by_market") or {}
+    groups: dict[str, dict[str, dict]] = defaultdict(dict)
+    for market, body in raw.items():
+        groups[market_type(config, market)][market] = {
+            "patas": int(_d(body.get("legs"))),
+            "comisiones_usd": _s(_d(body.get("fees_usd"))),
+            "deslizamiento_usd": _s(_d(body.get("slippage_usd"))),
+            "gas_usd": _s(_d(body.get("gas_usd"))),
+        }
+    out: dict[str, Any] = {}
+    for tipo, markets in sorted(groups.items()):
+        total = {key: ZERO for key in ("comisiones_usd", "deslizamiento_usd", "gas_usd")}
+        legs = 0
+        for body in markets.values():
+            legs += body["patas"]
+            for key in total:
+                total[key] += _d(body[key])
+        out[tipo] = {
+            "patas": legs,
+            **{key: _s(value) for key, value in total.items()},
+            "por_mercado": dict(sorted(markets.items())),
+        }
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -375,19 +474,22 @@ def fee_model(fees: dict[str, FeeSchedule], config: DeskConfig, notional: Decima
             "porcentual_bps": _bps(schedule.taker_bps),
             "minimo_por_operacion_usd": _s(schedule.min_fee_usd),
             "gas_fijo_por_operacion_usd": _s(schedule.gas_usd),
-            "gas_cobrado_en_libro": False,
+            "gas_por_pata_usd": _s(schedule.gas_usd),
+            "gas_ida_y_vuelta_usd": _s(schedule.gas_usd * 2),
+            "gas_cobrado_en_libro": True,
             "nocional_ejemplo_usd": _s(size),
             "comision_por_pata_usd": _s(per_leg),
             "comision_ida_y_vuelta_usd": _s(per_leg * 2),
             "parte_porcentual_por_pata_usd": _s(proportional),
             "parte_fija_por_pata_usd": _s(per_leg - proportional),
-            "fuente": FUENTES_COMISIONES.get(name, "config/fees.yaml"),
+            "fuente": schedule.fuente or FUENTE_SIN_CITA,
         }
     return {
         "formula": (
             "comision = max(nocional × taker_bps / 10000, min_fee_usd) por pata (entrada y salida). "
             "El mínimo no se suma: reemplaza a la parte porcentual cuando ésta es menor. "
-            "gas_usd está en la tabla, pero el libro no lo cobra hoy."
+            "Además, gas_usd fijo por pata (entrada y salida); hoy solo el pool DEX lo tiene. "
+            "Cada mercado elige su tabla con fee_schedule en config/desk.yaml."
         ),
         "codigo": "src/mesa_trading/broker/fees.py (commission_usd) y config/fees.yaml",
         "deslizamiento": (
@@ -479,20 +581,22 @@ def size_scenarios(trades: list[dict], fees: dict[str, FeeSchedule], config: Des
     for bot in bots:
         mine = [trade for trade in trades if (trade.get("bot") or "?") == bot]
         for k in MULTIPLICADORES_TAMANO:
-            bruto = fee_total = slip_total = nocional = ZERO
+            bruto = fee_total = slip_total = gas_total = nocional = ZERO
             for trade in mine:
                 market = trade.get("market") or ""
                 spec = config.markets.get(market)
                 schedule = fees.get(spec.fee_schedule) if spec else None
                 bruto += _d(trade.get("bruto_usd")) * k
                 slip_total += _d(trade.get("deslizamiento_usd")) * k
+                # El gas es fijo por pata: no crece con el tamaño.
+                gas_total += _d(trade.get("gas_usd"))
                 nocional += _d(trade.get("nocional_usd")) * k
                 if schedule is None:
                     fee_total += _d(trade.get("comisiones_usd")) * k
                     continue
                 for leg in (trade.get("nocional_usd"), trade.get("nocional_salida_usd") or trade.get("nocional_usd")):
                     fee_total += commission_usd(_d(leg) * k, schedule)
-            costos = fee_total + slip_total
+            costos = fee_total + slip_total + gas_total
             row = {
                 "estrategia": bot,
                 "multiplicador": format(k, "f"),
@@ -500,6 +604,7 @@ def size_scenarios(trades: list[dict], fees: dict[str, FeeSchedule], config: Des
                 "pnl_bruto_usd": _s(bruto),
                 "comisiones_usd": _s(fee_total),
                 "deslizamiento_usd": _s(slip_total),
+                "gas_usd": _s(gas_total),
                 "pnl_neto_usd": _s(bruto - costos),
             }
             if nocional > 0:
@@ -507,6 +612,72 @@ def size_scenarios(trades: list[dict], fees: dict[str, FeeSchedule], config: Des
                 row["bruto_bps"] = _bps(bruto / nocional * BPS)
             rows.append(row)
     return rows
+
+
+# --------------------------------------------------------------------------
+# Recalculo con la tabla y la contabilidad de hoy (reporte aparte, no toca el libro)
+
+
+def recalc_current_table(trades: list[dict], fees: dict[str, FeeSchedule], config: DeskConfig) -> dict:
+    """Las operaciones guardadas, otra vez, con la contabilidad de #29 y la tabla actual.
+
+    Por operación: neto_tabla_actual = P - comisión(tabla actual, por pata) -
+    gas(tabla actual, por pata). ``P`` es el mismo movimiento de precio que ya
+    se midió (con el deslizamiento dentro, una sola vez). Se separa cuánto
+    cambia por cada corrección:
+
+    - deslizamiento_doble: lo que el libro restó de más (neto - pnl_libro).
+    - comisiones: comisión registrada - comisión con la tabla de hoy (p. ej. el
+      pool WETH/USDC pasa de 30 a 5 bps).
+    - gas: gas registrado - gas con la tabla de hoy (negativo: antes no se cobraba).
+    """
+    groups: dict[str, dict[str, dict]] = {"total": {}, "por_estrategia": {}, "por_tipo_mercado": {}}
+    for trade in trades:
+        market = trade.get("market") or ""
+        spec = config.markets.get(market)
+        schedule = fees.get(spec.fee_schedule) if spec else None
+        fees_now = _d(trade.get("comisiones_usd"))
+        gas_now = _d(trade.get("gas_usd"))
+        if schedule is not None:
+            legs = (trade.get("nocional_usd"), trade.get("nocional_salida_usd") or trade.get("nocional_usd"))
+            fees_now = sum((commission_usd(_d(leg), schedule) for leg in legs), ZERO)
+            gas_now = schedule.gas_usd * 2
+        row = {
+            "operaciones": 1,
+            "pnl_libro": _d(trade.get("pnl_libro_usd")),
+            "neto_registrado": _d(trade.get("neto_usd")),
+            "efecto_deslizamiento_doble": _d(trade.get("neto_usd")) - _d(trade.get("pnl_libro_usd")),
+            "efecto_comisiones": _d(trade.get("comisiones_usd")) - fees_now,
+            "efecto_gas": _d(trade.get("gas_usd")) - gas_now,
+        }
+        row["neto_tabla_actual"] = row["neto_registrado"] + row["efecto_comisiones"] + row["efecto_gas"]
+        for bucket, key in (
+            ("total", "total"),
+            ("por_estrategia", trade.get("bot") or "?"),
+            ("por_tipo_mercado", market_type(config, market)),
+        ):
+            acc = groups[bucket].setdefault(key, {name: (0 if name == "operaciones" else ZERO) for name in row})
+            for name, value in row.items():
+                acc[name] += value
+
+    def view(acc: dict | None) -> dict:
+        acc = acc or {}
+        out = {"operaciones": int(acc.get("operaciones", 0))}
+        for name in ("pnl_libro", "neto_registrado", "efecto_deslizamiento_doble", "efecto_comisiones", "efecto_gas", "neto_tabla_actual"):
+            out[f"{name}_usd"] = _s(acc.get(name, ZERO))
+        out["diferencia_vs_libro_usd"] = _s(acc.get("neto_tabla_actual", ZERO) - acc.get("pnl_libro", ZERO))
+        return out
+
+    return {
+        "nota": (
+            "Reporte aparte. No reescribe el libro: pnl_libro es lo que el libro guardó. neto_tabla_actual "
+            "recalcula cada operación guardada con el deslizamiento una sola vez, la comisión de la tabla "
+            f"de hoy y el gas por pata. Cubre las operaciones con detalle (hasta {TRADE_CAP})."
+        ),
+        "total": view(groups["total"].get("total")),
+        "por_estrategia": {key: view(acc) for key, acc in sorted(groups["por_estrategia"].items())},
+        "por_tipo_mercado": {key: view(acc) for key, acc in sorted(groups["por_tipo_mercado"].items())},
+    }
 
 
 # --------------------------------------------------------------------------
@@ -539,6 +710,10 @@ def build_cost_section(
             bots[bot] = stats(acc)
         por_dia[day] = {"total": stats(total), "por_estrategia": bots}
     recientes = dict(list(por_dia.items())[-DIAS_EN_REPORTE:])
+    mercados: dict[str, dict[str, dict]] = defaultdict(lambda: defaultdict(_blank))
+    for _day, markets in sorted((store.get("dias_mercado") or {}).items()):
+        for market, raw in markets.items():
+            _merge(mercados[market_type(config, market)][market], _from_json(raw))
     detalle = summarize(trades)
     sin_entrada = sum(1 for trade in trades if not trade.get("entrada_conocida"))
     return {
@@ -549,7 +724,13 @@ def build_cost_section(
             "total": stats(acumulado),
             "por_estrategia": {bot: stats(acc) for bot, acc in sorted(acumulado_bot.items())},
         },
-        "acumulado_libro": book_cost_view(book_state),
+        "acumulado_libro": book_cost_view(book_state, config),
+        # Comisiones, deslizamiento y gas partidos por tipo de mercado (#29).
+        "por_tipo_mercado": {
+            "ventana_24h": by_market_type(window, config),
+            "acumulado": _type_view(mercados),
+        },
+        "recalculo_tabla_actual": recalc_current_table(trades, fees, config),
         "por_senal": summarize(trades, key=lambda t: f"{t.get('bot')}/{t.get('market')}/{t.get('side')}")["por_estrategia"],
         "por_salida": summarize(trades, key=lambda t: f"{t.get('bot')}/{t.get('motivo_salida') or '?'}")["por_estrategia"],
         "operaciones_con_detalle": len(trades),
@@ -570,9 +751,16 @@ def build_cost_section(
                 "se mide desde el bid/ask: el medio spread queda dentro del bruto"
             ),
             "comisiones": "lo que cobra la tabla de comisiones del simulador, entrada + salida",
-            "deslizamiento": "estimación del simulador (medio spread + impacto + 1 bp), entrada + salida",
-            "pnl_neto": "bruto - comisiones - deslizamiento",
-            "pnl_libro": "realizado que guarda el libro hoy; resta el deslizamiento dos veces",
+            "deslizamiento": (
+                "estimación del simulador (medio spread + impacto + 1 bp), entrada + salida. Va dentro del "
+                "precio del fill; se cobra una vez"
+            ),
+            "gas": "gas fijo por pata de la tabla (hoy solo el pool DEX), entrada + salida; desde #29",
+            "pnl_neto": "bruto - comisiones - deslizamiento - gas",
+            "pnl_libro": (
+                "realizado que guarda el libro. Desde #29 es igual al neto; los cierres de antes restaban "
+                "el deslizamiento dos veces (deslizamiento_doble_contado_usd) y no cobraban gas"
+            ),
         },
     }
 
@@ -584,6 +772,8 @@ def summary_for_estado(section: dict, now: datetime) -> dict:
         "ventana_24h": section.get("ventana_24h"),
         "por_dia_cdmx": section.get("por_dia_cdmx"),
         "acumulado": section.get("acumulado"),
+        "por_tipo_mercado": section.get("por_tipo_mercado"),
+        "recalculo_tabla_actual": section.get("recalculo_tabla_actual"),
         "modelo_comisiones": section.get("modelo_comisiones"),
     }
 
@@ -592,13 +782,13 @@ def render_cost_md(section: dict | None) -> list[str]:
     if not section:
         return []
     lines = ["## PnL bruto vs. neto y costos", ""]
-    lines.append("bruto = antes de comisiones y deslizamiento. neto = bruto - comisiones - deslizamiento.")
+    lines.append("bruto = antes de comisiones, deslizamiento y gas. neto = bruto - comisiones - deslizamiento - gas.")
     lines.append("")
 
     def row(label: str, body: dict) -> str:
         text = (
             f"- {label}: {body['operaciones']} ops. Bruto {body['pnl_bruto_usd']}, comisiones {body['comisiones_usd']}, "
-            f"deslizamiento {body['deslizamiento_usd']}, neto {body['pnl_neto_usd']} USD"
+            f"deslizamiento {body['deslizamiento_usd']}, gas {body.get('gas_usd', '0.0000')}, neto {body['pnl_neto_usd']} USD"
         )
         if body.get("pnl_libro_usd") is not None:
             text += f" (libro {body['pnl_libro_usd']})"
@@ -629,9 +819,39 @@ def render_cost_md(section: dict | None) -> list[str]:
         lines.append(
             f"- Desde el libro (todas, {libro['operaciones_cerradas']} cerradas): bruto {libro['pnl_bruto_usd']}, "
             f"comisiones {libro['comisiones_usd']}, deslizamiento {libro['deslizamiento_usd']}, "
-            f"neto {libro['pnl_neto_usd']}, libro {libro['pnl_libro_usd']} USD."
+            f"gas {libro.get('gas_usd', '0.0000')}, neto {libro['pnl_neto_usd']}, libro {libro['pnl_libro_usd']} USD "
+            f"(deslizamiento contado dos veces antes de #29: {libro['deslizamiento_doble_contado_usd']})."
         )
     lines.append("")
+    tipos = section.get("por_tipo_mercado") or {}
+    lines.append("### Comisiones por tipo de mercado (DEX vs. perps)")
+    for periodo in ("ventana_24h", "acumulado"):
+        bloque = tipos.get(periodo) or {}
+        if not bloque:
+            lines.append(f"- {periodo}: sin operaciones.")
+        for tipo, body in bloque.items():
+            lines.append(row(f"{periodo} {tipo}", body["total"]))
+            for market, inner in body["por_mercado"].items():
+                lines.append("  " + row(market, inner))
+    lines.append("")
+    recalc = section.get("recalculo_tabla_actual") or {}
+    if recalc:
+        lines.append("### Recalculo con la tabla y la contabilidad de hoy (reporte aparte)")
+        lines.append(recalc.get("nota", ""))
+
+        def recalc_row(label: str, body: dict) -> str:
+            return (
+                f"- {label}: {body['operaciones']} ops. Libro {body['pnl_libro_usd']} → recalculado "
+                f"{body['neto_tabla_actual_usd']} USD (deslizamiento doble +{body['efecto_deslizamiento_doble_usd']}, "
+                f"comisiones {body['efecto_comisiones_usd']}, gas {body['efecto_gas_usd']})."
+            )
+
+        lines.append(recalc_row("total", recalc.get("total") or {}))
+        for name, body in (recalc.get("por_tipo_mercado") or {}).items():
+            lines.append(recalc_row(name, body))
+        for name, body in (recalc.get("por_estrategia") or {}).items():
+            lines.append(recalc_row(name, body))
+        lines.append("")
     lines.append("### Por estrategia: ¿la señal cubre sus costos?")
     for bot, body in (section.get("por_estrategia_detalle") or {}).items():
         lines.append(_coverage_line(bot, body))
@@ -649,7 +869,7 @@ def render_cost_md(section: dict | None) -> list[str]:
             continue
         lines.append(
             f"- {name} ({', '.join(body['mercados'])}): {body['porcentual_bps']} bps por pata; mínimo "
-            f"{body['minimo_por_operacion_usd']} USD; gas {body['gas_fijo_por_operacion_usd']} USD (no cobrado). "
+            f"{body['minimo_por_operacion_usd']} USD; gas {body['gas_por_pata_usd']} USD por pata. "
             f"Con {body['nocional_ejemplo_usd']} USD: {body['comision_ida_y_vuelta_usd']} USD ida y vuelta "
             f"(fija {body['parte_fija_por_pata_usd']} + porcentual {body['parte_porcentual_por_pata_usd']} por pata). "
             f"Fuente: {body['fuente']}"
@@ -667,7 +887,8 @@ def render_cost_md(section: dict | None) -> list[str]:
     for item in sim.get("ordenes_mas_grandes") or []:
         lines.append(
             f"- {item['estrategia']} órdenes ×{item['multiplicador']}: bruto {item['pnl_bruto_usd']}, "
-            f"comisiones {item['comisiones_usd']}, deslizamiento {item['deslizamiento_usd']}, neto {item['pnl_neto_usd']} USD "
+            f"comisiones {item['comisiones_usd']}, deslizamiento {item['deslizamiento_usd']}, gas {item['gas_usd']}, "
+            f"neto {item['pnl_neto_usd']} USD "
             f"(costo {item.get('costo_bps', '—')} bps)."
         )
     lines.append("")

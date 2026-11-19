@@ -16,7 +16,10 @@ class FeeSchedule(BaseModel):
 
     taker_bps: Decimal
     min_fee_usd: Decimal
+    # Fijo por pata (entrada o salida). En DEX es el gas de la transacción del swap.
     gas_usd: Decimal = Decimal("0")
+    # De dónde sale la tarifa. Solo se muestra en el reporte de costos.
+    fuente: str = ""
 
 
 def load_fees(path: Path | None = None) -> dict[str, FeeSchedule]:

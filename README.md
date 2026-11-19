@@ -25,16 +25,20 @@ Mesa de trading 24/7 con **dinero simulado**. No hay broker real, ni llaves de e
 
 ## PnL bruto vs. neto y costos
 
-Solo medición (`src/mesa_trading/reports/costos.py`). No cambia umbrales, tamaño ni la contabilidad del libro.
+Medición en `src/mesa_trading/reports/costos.py`. No cambia umbrales ni tamaño.
 
-- El reporte diario trae `costos` en el JSON y una sección en el Markdown: últimas 24 h, por día (CDMX), acumulado y por estrategia (house, gambler). Para cada uno muestra el PnL bruto, las comisiones, el deslizamiento estimado y el PnL neto.
+- El reporte diario trae `costos` en el JSON y una sección en el Markdown: últimas 24 h, por día (CDMX), acumulado, por estrategia (house, gambler) y por tipo de mercado (DEX vs. perps). Para cada uno muestra el PnL bruto, las comisiones, el deslizamiento estimado, el gas y el PnL neto.
 - Por estrategia y por señal (estrategia/mercado/lado) muestra el número de operaciones, el tamaño promedio, el bruto promedio y el costo promedio, en USD y en bps. También dice si la señal cubre sus costos.
-- `GET /estado` → `costos.acumulado_libro` sale en vivo de `book/state.json`. Lo demás (24 h, por día, por estrategia) viene del último reporte (`reportes/costos/resumen.json`).
+- `GET /estado` → `costos.acumulado_libro` sale en vivo de `book/state.json`; su `por_tipo_mercado` parte comisiones, deslizamiento y gas entre `dex` y `perps` (cuenta desde #29, por pata). `costos.por_tipo_mercado` (24 h y acumulado) y lo demás vienen del último reporte (`reportes/costos/resumen.json`).
 - El estado acumulado vive en `reportes/costos/estado.json`. La primera corrida sin ese archivo relee la bitácora desde el inicio del libro, con un máximo de 60 días.
-- Modelo de comisiones: `comision = max(nocional × taker_bps / 10000, min_fee_usd)` por pata, con los valores de `config/fees.yaml`. Hoy `min_fee_usd` es 0 en los mercados activos, así que no hay parte fija y el costo escala 1:1 con el tamaño. `gas_usd` está en la tabla, pero el libro no lo cobra.
+- Modelo de comisiones: `comision = max(nocional × taker_bps / 10000, min_fee_usd)` por pata, más `gas_usd` fijo por pata, con la tabla de `config/fees.yaml` que cada mercado elige con `fee_schedule` en `config/desk.yaml`. Cada tabla cita su `fuente`.
+  - Perps de Hyperliquid (`hyperliquid_perp`): 4.5 bps por pata, sin gas.
+  - Pool WETH/USDC (`uniswap_v3_weth_usdc_005`): 5 bps por pata, el tier del pool `0x88e6…5640` (Uniswap v3, 0.05%), y 0.05 USD de gas por pata. La tabla genérica `dex_pool` (30 bps) sigue en el archivo, pero ningún mercado la usa.
+- El deslizamiento se cobra una sola vez: va dentro del precio del fill (compra más caro, vende más barato). El libro lo anota en `slippage_usd` como desglose, pero no lo resta otra vez. Desde #29, `pnl_libro` = neto en cada cierre.
 - `bruto` se mide desde el precio del fill sin deslizamiento. Si el fill cruzó el libro, ese precio es el bid/ask, así que el medio spread queda dentro del bruto.
-- `pnl_libro` es lo que guarda el libro hoy. Resta el deslizamiento dos veces: una en el precio del fill y otra en `close_position`. El reporte muestra la diferencia como `deslizamiento_doble_contado_usd`, pero no la corrige.
-- La sección "qué habría pasado" es solo un reporte. Vuelve a filtrar las operaciones pasadas con umbrales de entrada más altos y reescala el tamaño ×2 y ×4.
+- Historial: el libro **no se reescribe**. Los cierres de antes de #29 restaron el deslizamiento dos veces y no cobraron gas. Ese monto queda congelado en `slippage_double_counted_legacy_usd` (en la primera escritura con la contabilidad nueva) y el reporte lo muestra como `deslizamiento_doble_contado_usd`: neto = `pnl_libro` + ese monto. Los cierres nuevos llevan `contabilidad: 2` en la bitácora.
+- `recalculo_tabla_actual` es un reporte aparte: vuelve a calcular las operaciones guardadas con el deslizamiento una vez, la comisión de la tabla de hoy (p. ej. 5 bps en el pool) y el gas, y separa el efecto de cada corrección. No toca el libro.
+- La sección "qué habría pasado" es solo un reporte. Vuelve a filtrar las operaciones pasadas con umbrales de entrada más altos y reescala el tamaño ×2 y ×4 (el gas por pata no escala).
 
 ## Desarrollo
 

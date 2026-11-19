@@ -9,7 +9,7 @@ from decimal import ROUND_DOWN, Decimal
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from mesa_trading.book.store import BookStore, close_position, equity_usd, note_drawdown, open_position
+from mesa_trading.book.store import BOOK_ACCOUNTING_VERSION, BookStore, close_position, equity_usd, note_drawdown, open_position
 from mesa_trading.broker.factory import make_broker
 from mesa_trading.broker.fees import FeeSchedule
 from mesa_trading.broker.sim import SimBroker
@@ -528,6 +528,7 @@ def _open_filled(
             "qty": str(fill.qty),
             "fee_usd": str(fill.fee_usd),
             "slippage_usd": str(fill.slippage_usd),
+            "gas_usd": str(fill.gas_usd),
             "price_source": fill.price_source,
             "threshold_version": threshold_version,
         },
@@ -543,11 +544,12 @@ def _open_filled(
         opened_at=fill.filled_at,
         fees_usd=fill.fee_usd,
         slippage_usd=fill.slippage_usd,
+        gas_usd=fill.gas_usd,
         kind=kind,
         threshold_version=threshold_version,
         cuenta_como_evidencia=cuenta_como_evidencia,
     )
-    open_position(state, position, fill.fee_usd, fill.slippage_usd)
+    open_position(state, position, fill.fee_usd, fill.slippage_usd, fill.gas_usd)
     _remember_fill(
         state,
         bot=bot,
@@ -634,7 +636,7 @@ def _close(env, state, cycle_id, now, mode, reason, snapshot, book=None) -> int:
     if not fills:
         return 0
     fill = fills[-1]
-    pnl = close_position(state, fill.price, fill.fee_usd, fill.slippage_usd, fill.filled_at, reason=reason)
+    pnl = close_position(state, fill.price, fill.fee_usd, fill.slippage_usd, fill.filled_at, reason=reason, gas=fill.gas_usd)
     state.seen_orders.append(order.client_order_id)
     state.last_prices[pos.market] = str(fill.price)
     _remember_fill(
@@ -670,12 +672,16 @@ def _close(env, state, cycle_id, now, mode, reason, snapshot, book=None) -> int:
             "qty": str(fill.qty),
             "fee_usd": str(fill.fee_usd),
             "slippage_usd": str(fill.slippage_usd),
+            "gas_usd": str(fill.gas_usd),
             # Solo medición (issue #26): la pata de entrada, para separar bruto y costos.
             "entry_price": str(pos.entry_price),
             "entry_qty": str(pos.qty),
             "entry_notional_usd": str(pos.notional_usd),
             "entry_fee_usd": str(pos.fees_usd),
             "entry_slippage_usd": str(pos.slippage_usd),
+            "entry_gas_usd": str(pos.gas_usd),
+            # 2 = el pnl_usd de este cierre cobra el deslizamiento una vez y el gas (#29).
+            "contabilidad": BOOK_ACCOUNTING_VERSION,
             "reason": reason,
             "pnl_usd": str(pnl),
             "price_source": fill.price_source,
