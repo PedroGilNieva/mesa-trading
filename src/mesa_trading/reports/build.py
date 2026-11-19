@@ -14,6 +14,7 @@ from mesa_trading.constants import ESTIMATED_INPUT_TOKENS_PER_CALL
 from mesa_trading.policy.decide import is_simulation_policy_version
 from mesa_trading.questions.catalog import battery_for
 from mesa_trading.filter.funnel import silent_step_alerts
+from mesa_trading.reports.costos import render_cost_md
 from mesa_trading.util import as_utc, iso
 
 CDMX = ZoneInfo("America/Mexico_City")
@@ -493,6 +494,7 @@ def render_daily_md(report: dict) -> str:
     for reason, count in motivos.items():
         lines.append(f"- {reason}: {count}")
     lines.append("")
+    lines.extend(render_cost_md(report.get("costos")))
     veredicto = report.get("veredicto")
     if veredicto:
         lines.append("## Veredicto de la estrategia")
