@@ -14,7 +14,14 @@ from mesa_trading.book.store import equity_usd, note_drawdown
 from mesa_trading.broker.fees import load_fees
 from mesa_trading.cli.stores import open_book, open_logs
 from mesa_trading.config import default_desk_path, default_promotion_path, load_desk, load_promotion
-from mesa_trading.reports.build import apply_verdict, build_calibration, build_daily, evidence_snapshot, write_reports
+from mesa_trading.reports.build import (
+    apply_verdict,
+    book_sample,
+    build_calibration,
+    build_daily,
+    evidence_snapshot,
+    write_reports,
+)
 from mesa_trading.reports.costos import (
     RESUMEN_KEY,
     STORE_KEY,
@@ -66,6 +73,8 @@ def main(argv: list[str] | None = None) -> int:
         max_drawdown_usd=Decimal(str(evidence["drawdown_usd"])),
         now=now,
         pnl_usd=Decimal(str(evidence["pnl_usd"])),
+        # El contador sale del mismo libro que /estado (book/state.json).
+        book=book_sample(state.model_dump(mode="json"), now),
     )
     _save_pairs(args.data_dir, calibration.get("pair_store") or {})
     # Solo medición (#26): bruto vs. neto y costos. Si falla, el reporte sale igual.

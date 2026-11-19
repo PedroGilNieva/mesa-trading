@@ -145,7 +145,14 @@ def open_position(book: BookState, position: Position, fee: Decimal, slip: Decim
     return book
 
 
-def close_position(book: BookState, exit_price: Decimal, fee: Decimal, slip: Decimal, when: datetime) -> Decimal:
+def close_position(
+    book: BookState,
+    exit_price: Decimal,
+    fee: Decimal,
+    slip: Decimal,
+    when: datetime,
+    reason: str | None = None,
+) -> Decimal:
     assert book.position is not None
     pos = book.position
     gross = (exit_price - pos.entry_price) * pos.qty if pos.side == "long" else (pos.entry_price - exit_price) * pos.qty
@@ -157,6 +164,8 @@ def close_position(book: BookState, exit_price: Decimal, fee: Decimal, slip: Dec
     book.realized_pnl_usd += pnl
     book.day_realized_pnl_usd += pnl
     book.closed_trades += 1
+    key = reason or "sin_motivo"
+    book.closed_by_reason[key] = int(book.closed_by_reason.get(key, 0)) + 1
     book.fees_usd += fee
     book.slippage_usd += slip
     book.position = None
