@@ -108,3 +108,46 @@ real_money:
   max_capital_usd: 100
   max_order_usd: 25
   max_daily_loss_usd: 10
+# Estrategias en papel (#31). Libro y reporte aparte de house/gambler; no hay
+# órdenes ni broker. Capital teórico propio. Ver docs/sombra.md.
+sombra:
+  funding_historial_dias: 120
+  # Tope de tiempo de sombra por tick (s) y páginas de funding por activo por tick.
+  deadline_segundos: 20
+  paginas_funding_por_tick: 2
+  carry:
+    enabled: true
+    capital_usd: 10000
+    activos: [ETH, BTC]
+    # BTC no tiene pool en la mesa: se usa la tabla genérica de 30 bps (conservadora).
+    fee_spot: {ETH: uniswap_v3_weth_usdc_005, BTC: dex_pool}
+    fee_perp: hyperliquid_perp
+    spread_spot_bps: 10
+    liquidez_supuesta_usd: 50000000
+    extra_bps: 1
+    nocional_pct: 0.25
+    ventana_funding_horas: 72
+    horizonte_dias: 30
+    umbral_neto_anual: 0.05
+    horas_negativo_cierre: 24
+    limite_base: 0.01
+    descarte_dias: 30
+    descarte_min_pct_positivo: 0.60
+  tendencia:
+    enabled: true
+    capital_usd: 10000
+    activos: [ETH, BTC]
+    fee_schedule: hyperliquid_perp
+    liquidez_supuesta_usd: 50000000
+    extra_bps: 1
+    riesgo_pct: 0.005
+    sma_1d: 50
+    donchian_entrada_4h: 20
+    donchian_salida_4h: 10
+    atr_1d: 14
+    atr_mult_stop: 2
+    # Ventaja supuesta (no medida) para el veto de economía. Decisión de producto:
+    # 80, igual que house en policy.yaml.
+    expected_edge_bps: 80
+    descarte_operaciones: 20
+    descarte_dias: 60

@@ -83,6 +83,15 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001
         daily["costos"] = None
         daily.setdefault("alertas", []).append(f"costos_no_calculados:{exc.__class__.__name__}")
+    # Sombra (#31): carry y tendencia, libro aparte. Si falla, el reporte sale igual.
+    try:
+        from mesa_trading.cli.stores import open_root
+        from mesa_trading.sombra.reporte import seccion_diaria
+
+        daily["sombra"] = seccion_diaria(open_root(args.data_dir), now)
+    except Exception as exc:  # noqa: BLE001
+        daily["sombra"] = None
+        daily.setdefault("alertas", []).append(f"sombra_no_calculada:{exc.__class__.__name__}")
     if os.environ.get("MESA_BUCKET"):
         root = data_root_from_env()
         _write_remote(root, daily, calibration)

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from mesa_trading.broker.fees import load_fees
-from mesa_trading.cli.stores import open_book, open_logs
+from mesa_trading.cli.stores import open_book, open_logs, open_root
 from mesa_trading.config import default_desk_path, load_desk
 from mesa_trading.connectors.fixture import FixtureConnector
 from mesa_trading.connectors.live import GeckoTerminalConnector, HyperliquidInfoConnector
@@ -36,6 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     now = datetime.now(timezone.utc)
     cycle_id = args.cycle_id or now.strftime("%Y%m%dT%H%M%SZ")
     data = Path(args.data_dir)
+    hyper = None
     if args.fixture:
         connector = FixtureConnector()
 
@@ -75,7 +76,21 @@ def main(argv: list[str] | None = None) -> int:
         fees=load_fees(),
         curves=curves_from_policy(policy),
     )
+    fees = env.fees
     run_cycle(env, cycle_id, now)
+    # Sombra (#31): carry y tendencia en papel, libro aparte. Un fallo aquí no
+    # toca el ciclo de la mesa, que ya terminó.
+    if hyper is not None and config.connectors["hyperliquid"].enabled:
+        try:
+            from mesa_trading.sombra.runner import correr
+
+            # Tope de tiempo: sombra.deadline_segundos. Si se pasa, corta y sigue
+            # en el próximo tick (ver sombra/runner.py).
+            resumen = correr(open_root(str(data)), hyper, config, fees, now)
+            if (resumen.get("plazo") or {}).get("cortado"):
+                print("aviso: sombra cortó por deadline; sigue en el próximo tick", file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001
+            print(f"aviso: sombra no corrió: {exc.__class__.__name__}", file=sys.stderr)
     return 0
 
 

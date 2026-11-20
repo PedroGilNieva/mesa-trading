@@ -16,6 +16,7 @@ from mesa_trading.config import default_desk_path, load_desk
 from mesa_trading.policy.decide import load_policy
 from mesa_trading.reports.costos import RESUMEN_KEY, book_cost_view
 from mesa_trading.reports.decisions import cached_decision_report
+from mesa_trading.sombra.reporte import vista_estado
 from mesa_trading.storage import DataRoot, data_root_from_env
 
 
@@ -62,6 +63,8 @@ def create_app(root: DataRoot | None = None, desk_path: Path | None = None) -> F
                 "halted_until": state.get("halted_until"),
                 "halt_rule": state.get("halt_rule"),
             },
+            # Carry y tendencia en papel (#31). Libro aparte; un objeto: sombra/resumen.json.
+            "sombra": vista_estado(store),
             "broker": "simulado",
         }
 

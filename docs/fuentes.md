@@ -33,6 +33,7 @@ Verificado el 2026-11-06, antes de dejar los conectores prendidos. La mesa solo 
 - Staging lee cinco perps (BTC, ETH, SOL, DOGE, XRP). El símbolo de `candleSnapshot` y `l2Book` es el producto (`BTC`), no el alias de la mesa (`BTC-PERP`): ese alias responde 500. `metaAndAssetCtxs` se cachea en el proceso del ciclo, así que el funding no se pide una vez por mercado. El peso de un ciclo queda muy por debajo de 1200 por minuto.
 - La documentación presenta esta API como API pública para desarrolladores. La mesa no usa el SDK (está en la lista negra de dependencias) ni firma nada.
 - Conector: **encendido**. Prueba sin credenciales: `POST /info` con `{"type":"meta"}` respondió 200.
+- Sombra (#31, `docs/sombra.md`): `fundingHistory` (funding por hora de ETH y BTC, se pide a lo más una vez por hora y activo), `oraclePx` de `metaAndAssetCtxs` (ya cacheado) y `candleSnapshot` de 4h y 1D solo al cerrar una vela de 4h. Mismo host y ruta, sin llaves.
 - Mercados: BTC perpetuo, para funding y para el único caso en que «corto» existe dentro de la simulación. En spot, corto sigue siendo no entrar.
 
 ## Spy y Fase 2
