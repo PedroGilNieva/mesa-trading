@@ -7,6 +7,8 @@ toca `book/state.json` ni crea órdenes: no hay broker en este camino.
 from __future__ import annotations
 
 import json
+import time
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from decimal import Decimal
 
@@ -32,20 +34,55 @@ def activos(config: DeskConfig) -> list[str]:
     return out
 
 
-def correr(root: DataRoot, fuente, config: DeskConfig, fees: dict[str, FeeSchedule], now: datetime) -> dict:
+class Plazo:
+    """Deadline total de sombra en un tick. Se revisa antes de cada llamada HTTP."""
+
+    def __init__(self, segundos: float, reloj: Callable[[], float] = time.monotonic) -> None:
+        self._reloj = reloj
+        self.segundos = float(segundos)
+        self.limite = reloj() + self.segundos
+        self.cortado = False
+
+    def agotado(self) -> bool:
+        if not self.cortado and self._reloj() >= self.limite:
+            self.cortado = True
+        return self.cortado
+
+
+def correr(
+    root: DataRoot,
+    fuente,
+    config: DeskConfig,
+    fees: dict[str, FeeSchedule],
+    now: datetime,
+    reloj: Callable[[], float] = time.monotonic,
+) -> dict:
+    """Un tick de sombra con tope de tiempo `sombra.deadline_segundos`.
+
+    Si se acaba el tiempo, no hace más llamadas: corre las estrategias con lo que
+    ya tiene (los activos sin precio no se tocan), guarda y sigue en el próximo tick.
+    """
     sc = config.sombra
     lista = activos(config)
     if not lista:
         return {}
+    plazo = Plazo(sc.deadline_segundos, reloj)
     errores: dict[str, str] = {}
 
-    historial = fh.actualizar_historial(_leer(root, fh.HISTORIAL_KEY), fuente, lista, now, sc.funding_historial_dias)
+    historial = fh.actualizar_historial(
+        _leer(root, fh.HISTORIAL_KEY), fuente, lista, now, sc.funding_historial_dias,
+        paginas=sc.paginas_funding_por_tick, agotado=plazo.agotado,
+    )
+    # Se guarda ya: el avance del relleno no se pierde aunque lo de abajo falle.
     _escribir(root, fh.HISTORIAL_KEY, historial)
     for activo, err in (historial.get("errores") or {}).items():
         errores[f"funding:{activo}"] = err
 
     mercado: dict[str, dict] = {}
     for activo in lista:
+        if plazo.agotado():
+            errores[f"precio:{activo}"] = "deadline"
+            continue
         try:
             ctx = fuente.asset_context(activo) or {}
             book = fuente.order_book(activo) or {}
@@ -62,7 +99,16 @@ def correr(root: DataRoot, fuente, config: DeskConfig, fees: dict[str, FeeSchedu
     if sc.carry.enabled:
         raw = _leer(root, CARRY_KEY)
         estado_c = carry.EstadoCarry.model_validate(raw) if raw else carry.nuevo(sc.carry, now)
-        precios = {a: mercado[a] for a in sc.carry.activos if a in mercado}
+        # Sin el funding al día (relleno a medias) el carry no evalúa ese activo:
+        # sus medias de 72 h y 24 h serían viejas. Retoma cuando el relleno termine.
+        precios = {}
+        for a in sc.carry.activos:
+            if a not in mercado:
+                continue
+            if not fh.al_dia(historial, a, now):
+                errores.setdefault(f"funding:{a}", "relleno_pendiente")
+                continue
+            precios[a] = mercado[a]
         carry.paso(estado_c, historial, precios, sc.carry, fees, config.risk.max_position_pct, now)
         _escribir(root, CARRY_KEY, json.loads(estado_c.model_dump_json()))
         estrategias["carry"] = carry.resumen(estado_c, historial, sc.carry, now)
@@ -77,6 +123,9 @@ def correr(root: DataRoot, fuente, config: DeskConfig, fees: dict[str, FeeSchedu
                 continue
             datos[activo] = {"bid": mercado[activo]["bid"], "ask": mercado[activo]["ask"]}
             if not tendencia.necesita_velas(estado_t, activo, now):
+                continue
+            if plazo.agotado():
+                errores[f"velas:{activo}"] = "deadline"
                 continue
             try:
                 # 4h: las velas de entrada y salida más holgura. 1D: SMA y ATR más holgura.
@@ -100,6 +149,7 @@ def correr(root: DataRoot, fuente, config: DeskConfig, fees: dict[str, FeeSchedu
         "funding": fh.resumen_persistencia(historial, lista, now),
         "estrategias": estrategias,
         "errores": errores,
+        "plazo": {"deadline_segundos": plazo.segundos, "cortado": plazo.cortado},
     }
     _escribir(root, RESUMEN_KEY, resumen)
     return resumen

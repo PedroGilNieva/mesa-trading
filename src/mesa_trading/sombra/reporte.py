@@ -90,10 +90,12 @@ def render_md(seccion: dict | None) -> list[str]:
         if nombre == "tendencia":
             lines.append(f"Esperanza neta por operación: {regla.get('esperanza_neta_por_operacion_usd')} USD.")
         if nombre == "carry":
-            lines.append(
-                f"Funding positivo desde el inicio: {_pct(regla.get('funding_pct_positivo'))} "
-                f"({regla.get('funding_horas_positivas')}/{regla.get('funding_horas_total')} horas)."
-            )
+            partes = [
+                f"{a} {_pct(v.get('pct_positivo'))} ({v.get('horas_positivas')}/{v.get('horas_total')} h)"
+                for a, v in (regla.get("funding_por_activo") or {}).items()
+            ]
+            if partes:
+                lines.append("Funding positivo con posición abierta, por activo: " + "; ".join(partes) + ".")
         vent = (seccion.get("ultimas_24h") or {}).get(nombre)
         if vent:
             lines.append(f"Últimas 24 h: {vent['cierres']} cierres, neto {vent['neto_usd']} USD.")

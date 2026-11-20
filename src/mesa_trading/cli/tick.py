@@ -84,7 +84,11 @@ def main(argv: list[str] | None = None) -> int:
         try:
             from mesa_trading.sombra.runner import correr
 
-            correr(open_root(str(data)), hyper, config, fees, now)
+            # Tope de tiempo: sombra.deadline_segundos. Si se pasa, corta y sigue
+            # en el próximo tick (ver sombra/runner.py).
+            resumen = correr(open_root(str(data)), hyper, config, fees, now)
+            if (resumen.get("plazo") or {}).get("cortado"):
+                print("aviso: sombra cortó por deadline; sigue en el próximo tick", file=sys.stderr)
         except Exception as exc:  # noqa: BLE001
             print(f"aviso: sombra no corrió: {exc.__class__.__name__}", file=sys.stderr)
     return 0

@@ -112,6 +112,9 @@ real_money:
 # órdenes ni broker. Capital teórico propio. Ver docs/sombra.md.
 sombra:
   funding_historial_dias: 120
+  # Tope de tiempo de sombra por tick (s) y páginas de funding por activo por tick.
+  deadline_segundos: 20
+  paginas_funding_por_tick: 2
   carry:
     enabled: true
     capital_usd: 10000
@@ -143,6 +146,7 @@ sombra:
     donchian_salida_4h: 10
     atr_1d: 14
     atr_mult_stop: 2
+    # Ventaja supuesta (no medida) para el veto de economía. Decisión de producto.
     expected_edge_bps: 100
     descarte_operaciones: 20
     descarte_dias: 60

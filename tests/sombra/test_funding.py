@@ -53,3 +53,40 @@ def test_persistencia_30_y_90_dias():
     assert Decimal(p90["pct_positivo"]) == Decimal("0.2500")
     vacio = fh.persistencia(store, "BTC", now, 30)
     assert vacio["pct_positivo"] is None and vacio["periodos"] == 0
+
+
+def test_relleno_inicial_incremental_guarda_el_avance():
+    now = T0 + timedelta(days=130)
+    filas = horas(now - timedelta(days=120), 120 * 24 + 1, "0.00001")  # 2881 h, la última es `now`
+    fuente = FuenteFalsa(funding={"ETH": filas}, pagina=500)
+    store = None
+    largos = []
+    for tick in range(3):
+        fuente.llamadas.clear()
+        store = fh.actualizar_historial(store, fuente, ["ETH"], now, dias=120, paginas=2)
+        pedidas = [c for c in fuente.llamadas if c[0] == "funding"]
+        assert len(pedidas) <= 2  # pocas páginas por tick
+        if tick:
+            # Sigue desde la última fila guardada, no desde el piso.
+            assert pedidas[0][2] == largos[-1] + 1
+        largos.append(int(store["series"]["ETH"][-1][0]))
+        assert store["al_dia"]["ETH"] is (tick == 2)
+    assert len(store["series"]["ETH"]) == 2881
+    assert fh.al_dia(store, "ETH", now) and not fh.al_dia(store, "BTC", now)
+
+
+def test_historial_corta_por_deadline_sin_perder_lo_bajado():
+    now = T0 + timedelta(days=30)
+    filas = horas(now - timedelta(days=30), 30 * 24 + 1, "0.00001")
+    fuente = FuenteFalsa(funding={"ETH": filas, "BTC": filas}, pagina=500)
+    restantes = iter([False, True])  # deja una llamada y corta
+
+    store = fh.actualizar_historial(None, fuente, ["ETH", "BTC"], now, dias=30, paginas=2, agotado=lambda: next(restantes, True))
+    assert [c[1] for c in fuente.llamadas] == ["ETH"]
+    assert len(store["series"]["ETH"]) == 500
+    assert store["series"]["BTC"] == []
+    assert store["errores"] == {"ETH": "deadline", "BTC": "deadline"}
+    # El próximo tick sin apuro termina el relleno desde donde quedó.
+    store = fh.actualizar_historial(store, fuente, ["ETH", "BTC"], now, dias=30, paginas=2)
+    assert len(store["series"]["ETH"]) == len(store["series"]["BTC"]) == 30 * 24 + 1
+    assert store["errores"] == {} and store["al_dia"] == {"ETH": True, "BTC": True}

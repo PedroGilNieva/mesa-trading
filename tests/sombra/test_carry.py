@@ -107,23 +107,41 @@ def test_cierra_si_la_base_se_desvia():
 
 def test_regla_de_descarte_carry():
     estado = carry.nuevo(CFG, T0)
-    positivo = historial({"ETH": horas(T0, 31 * 24, "0.0001"), "BTC": horas(T0, 31 * 24, "0.0001")})
     # Antes de 30 días: en prueba aunque el neto sea 0.
-    assert carry.regla_descarte(estado, positivo, CFG, {}, T0 + timedelta(days=10))["estado"] == "en_prueba"
-    # A los 30 días con neto 0 (nunca abrió): descartada.
-    r = carry.regla_descarte(estado, positivo, CFG, {}, T0 + timedelta(days=30))
+    assert carry.regla_descarte(estado, None, CFG, {}, T0 + timedelta(days=10))["estado"] == "en_prueba"
+    # A los 30 días con neto 0 (nunca abrió): descartada solo por el neto; sin horas
+    # con posición no hay % de funding que juzgar.
+    r = carry.regla_descarte(estado, None, CFG, {}, T0 + timedelta(days=30))
     assert r["estado"] == "descartada" and r["motivos_si_hoy"] == ["neto_no_positivo"]
-    # Neto positivo y funding positivo 100%: pasa.
+    assert r["funding_por_activo"]["ETH"]["pct_positivo"] is None
+    # Neto positivo y ETH 100% positivo con posición; BTC nunca abrió: pasa.
     estado.realizado.funding_usd = Decimal("50")
-    assert carry.regla_descarte(estado, positivo, CFG, {}, T0 + timedelta(days=30))["estado"] == "pasa"
-    # Neto positivo pero funding positivo solo 50% de las horas: descartada.
-    mitad = historial({
-        "ETH": horas(T0, 31 * 24, "0.0001"),
-        "BTC": horas(T0, 31 * 24, "-0.0001"),
-    })
-    r = carry.regla_descarte(estado, mitad, CFG, {}, T0 + timedelta(days=30))
+    carry.anotar_horas(estado, "ETH", 100, 100)
+    assert carry.regla_descarte(estado, None, CFG, {}, T0 + timedelta(days=30))["estado"] == "pasa"
+    # BTC con posición abierta solo 50% positivo: descarta aunque ETH+BTC juntos den 75%.
+    carry.anotar_horas(estado, "BTC", 100, 50)
+    r = carry.regla_descarte(estado, None, CFG, {}, T0 + timedelta(days=30))
     assert r["estado"] == "descartada" and r["motivos_si_hoy"] == ["funding_positivo_bajo_minimo"]
-    assert r["funding_pct_positivo"] == "0.5000"
+    assert r["funding_bajo_minimo"] == ["BTC"]
+    assert r["funding_por_activo"]["ETH"]["pct_positivo"] == "1.0000"
+    assert r["funding_por_activo"]["BTC"] == {"horas_total": 100, "horas_positivas": 50, "pct_positivo": "0.5000"}
+
+
+def test_regla_ignora_horas_sin_posicion_abierta():
+    """El funding del mercado con el carry cerrado no cuenta para el % del descarte."""
+    estado = carry.nuevo(CFG, T0)
+    # 72 h altas antes de T0 → abre ETH en T0.
+    previas = horas(T0 - timedelta(hours=72), 73, "0.0001")
+    carry.paso(estado, historial({"ETH": previas}), {"ETH": px()}, CFG, FEES, PCT, T0)
+    assert "ETH" in estado.posiciones
+    # 4 horas con posición: +, +, +, -.
+    con_pos = [(ms(T0) + i * HORA_MS, Decimal(r)) for i, r in enumerate(["0.0001", "0.0001", "0.0001", "-0.00001"], start=1)]
+    carry.paso(estado, historial({"ETH": previas + con_pos}), {"ETH": px()}, CFG, FEES, PCT, T0 + timedelta(hours=4))
+    assert estado.funding_horas["ETH"] == {"total": 4, "positivas": 3}
+    # Las horas de antes de abrir (72 positivas) no entran.
+    r = carry.regla_descarte(estado, None, CFG, {}, T0 + timedelta(hours=4))
+    assert r["funding_por_activo"]["ETH"]["pct_positivo"] == "0.7500"
+    assert r["funding_por_activo"]["BTC"]["horas_total"] == 0
 
 
 def test_paso_descarta_cierra_y_no_vuelve_a_abrir():
@@ -132,7 +150,8 @@ def test_paso_descarta_cierra_y_no_vuelve_a_abrir():
     filas = horas(T0, 30 * 24 + 1, "-0.00001")
     carry.paso(estado, historial({"ETH": filas}), {"ETH": px()}, CFG, FEES, PCT, now)
     assert estado.descartada is True
-    assert "funding_positivo_bajo_minimo" in (estado.motivo_descarte or "")
+    # Nunca abrió (funding negativo): descarta por neto 0, no por % de funding.
+    assert estado.motivo_descarte == "neto_no_positivo"
     alto = filas + horas(now + timedelta(hours=1), 80, "0.001")
     carry.paso(estado, historial({"ETH": alto}), {"ETH": px()}, CFG, FEES, PCT, now + timedelta(hours=80))
     assert estado.posiciones == {}

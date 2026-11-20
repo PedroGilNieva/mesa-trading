@@ -13,8 +13,11 @@ Reglas:
   la tasa es negativa). El spot es el oráculo de Hyperliquid en el tick en que se
   anota la hora; es una aproximación al precio exacto de esa hora.
 - Descarte: tras `descarte_dias` días, si el neto (realizado + abierto) es ≤ 0 o
-  el funding fue positivo menos del `descarte_min_pct_positivo` de las horas, se
-  marca descartada, se cierran las posiciones y no abre más.
+  en algún activo el funding fue positivo menos del `descarte_min_pct_positivo`
+  de las horas con posición abierta en ese activo, se marca descartada, se cierran
+  las posiciones y no abre más. El % se mide por activo (ETH y BTC por separado),
+  solo con las horas cobradas/pagadas por una posición; un activo que nunca abrió
+  no cuenta para este criterio (sin posiciones el neto es 0 y ya descarta).
 """
 
 from __future__ import annotations
@@ -39,7 +42,7 @@ from mesa_trading.sombra.libro import (
     spread_bps,
     totales_dict,
 )
-from mesa_trading.util import as_utc, iso
+from mesa_trading.util import iso
 
 
 class PosicionCarry(BaseModel):
@@ -75,6 +78,8 @@ class EstadoCarry(BaseModel):
     descartada: bool = False
     motivo_descarte: str | None = None
     vetos: dict[str, int] = Field(default_factory=dict)
+    # Por activo: horas de funding con posición abierta y cuántas fueron > 0.
+    funding_horas: dict[str, dict[str, int]] = Field(default_factory=dict)
     ultima_evaluacion: dict[str, dict] = Field(default_factory=dict)
     ultimos_precios: dict[str, dict] = Field(default_factory=dict)
 
@@ -269,14 +274,19 @@ def equity(estado: EstadoCarry, precios: dict[str, dict]) -> Decimal:
 def regla_descarte(estado: EstadoCarry, historial: dict | None, cfg: CarryConfig, precios: dict[str, dict], now: datetime) -> dict:
     """Progreso y veredicto de la regla de descarte del carry."""
     dias = dias_entre(estado.iniciado_en, now)
-    positivas, total = fh.pct_positivo_desde(historial, cfg.activos, as_utc(estado.iniciado_en), now)
-    pct = (Decimal(positivas) / Decimal(total)) if total else None
+    _ = historial  # Se mantiene la firma; el % se mide con las horas de las posiciones.
+    por_activo = funding_por_activo(estado, cfg)
     neto = equity(estado, precios) - estado.capital_usd
     cumplido = dias >= cfg.descarte_dias
     motivos = []
     if neto <= 0:
         motivos.append("neto_no_positivo")
-    if pct is None or pct < cfg.descarte_min_pct_positivo:
+    bajos = [
+        a
+        for a, v in por_activo.items()
+        if v["pct_positivo"] is not None and Decimal(v["pct_positivo"]) < cfg.descarte_min_pct_positivo
+    ]
+    if bajos:
         motivos.append("funding_positivo_bajo_minimo")
     if estado.descartada:
         estado_regla = "descartada"
@@ -290,19 +300,39 @@ def regla_descarte(estado: EstadoCarry, historial: dict | None, cfg: CarryConfig
         "estado": estado_regla,
         "regla": (
             f"tras {cfg.descarte_dias} días: descartada si neto ≤ 0 o funding positivo "
-            f"< {s(cfg.descarte_min_pct_positivo * 100, 0)}% de las horas"
+            f"< {s(cfg.descarte_min_pct_positivo * 100, 0)}% de las horas con posición abierta, en algún activo"
         ),
         "dias": s(dias, 2),
         "dias_requeridos": cfg.descarte_dias,
         "progreso_pct": s(min(Decimal("1"), dias / Decimal(cfg.descarte_dias)) * 100, 1),
         "neto_usd": s(neto),
-        "funding_horas_positivas": positivas,
-        "funding_horas_total": total,
-        "funding_pct_positivo": s(pct, 4) if pct is not None else None,
+        "funding_por_activo": por_activo,
+        "funding_bajo_minimo": bajos,
         "min_pct_positivo": s(cfg.descarte_min_pct_positivo, 4),
         "motivos_si_hoy": motivos,
         "motivo_descarte": estado.motivo_descarte,
     }
+
+
+def funding_por_activo(estado: EstadoCarry, cfg: CarryConfig) -> dict[str, dict]:
+    """% de horas con funding > 0, por activo, solo con posición abierta."""
+    out = {}
+    for activo in cfg.activos:
+        h = estado.funding_horas.get(activo) or {}
+        total, positivas = int(h.get("total", 0)), int(h.get("positivas", 0))
+        out[activo] = {
+            "horas_total": total,
+            "horas_positivas": positivas,
+            "pct_positivo": s(Decimal(positivas) / Decimal(total), 4) if total else None,
+        }
+    return out
+
+
+def anotar_horas(estado: EstadoCarry, activo: str, total: int, positivas: int) -> None:
+    h = dict(estado.funding_horas.get(activo) or {"total": 0, "positivas": 0})
+    h["total"] = int(h.get("total", 0)) + total
+    h["positivas"] = int(h.get("positivas", 0)) + positivas
+    estado.funding_horas[activo] = h
 
 
 def paso(
@@ -325,7 +355,9 @@ def paso(
         if not px:
             continue
         pos = estado.posiciones[activo]
+        antes = (pos.horas_funding, pos.horas_positivas)
         cobrar_funding(historial, pos, px["spot"], now)
+        anotar_horas(estado, activo, pos.horas_funding - antes[0], pos.horas_positivas - antes[1])
         perp_mid = (px["bid"] + px["ask"]) / 2
         motivo = debe_cerrar(historial, pos, px["spot"], perp_mid, cfg, now)
         if motivo:

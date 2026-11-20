@@ -16,6 +16,20 @@ los topes de `risk` (se leen, no se tocan).
   y ruta de la lista blanca). Hyperliquid paga funding cada hora; anualizado =
   tasa horaria × 8760. Se guarda en `sombra/funding/historial.json` (120 días),
   se pide solo cuando ya debe existir una hora nueva.
+- **Relleno incremental**: a lo más `paginas_funding_por_tick` (2) páginas de
+  ≤ 500 h por activo y por tick; el avance es la propia serie guardada, así que el
+  relleno inicial de 120 días (~6 páginas) termina en ~3 ticks. Mientras la serie
+  de un activo no llegue a las últimas 2 h, el carry no evalúa ese activo
+  (`errores.funding:<activo> = relleno_pendiente`).
+
+## Tope de tiempo
+
+`sombra.deadline_segundos` (20 s) es el tiempo total de sombra en cada tick. Se
+revisa antes de cada llamada HTTP (funding, precios, velas); si se pasa, no hace
+más llamadas, corre las estrategias con lo que ya tiene (sin tocar los activos sin
+precio), guarda y sigue en el próximo tick. Queda `plazo.cortado = true` en
+`sombra/resumen.json` y un aviso en stderr. Lo más que se excede es una llamada
+(timeout HTTP de 8 s).
 - Precio spot: `oraclePx` de `metaAndAssetCtxs` (índice spot de Hyperliquid).
   Precio perp: medio del `l2Book`.
 - Velas 4h y 1D: `candleSnapshot`, solo cuando cerró una vela de 4h nueva.
@@ -43,9 +57,12 @@ los topes de `risk` (se leen, no se tocan).
 - **Cierra** si el funding medio de las últimas 24 h es negativo, o si la base
   `(perp − spot)/spot` se aleja más de `limite_base` (1%) de la de entrada.
 - Funding: por cada hora nueva, `qty × spot × tasa` (spot del tick en que se anota).
-- **Descarte**: tras 30 días, si el neto (realizado + abierto) ≤ 0 o el funding fue
-  positivo menos del 60% de las horas (ETH y BTC juntos), se marca descartada,
-  cierra lo abierto y no abre más.
+- **Descarte**: tras 30 días, si el neto (realizado + abierto) ≤ 0 o, en algún
+  activo, el funding fue positivo menos del 60% de las horas **con posición
+  abierta en ese activo** (ETH y BTC por separado), se marca descartada, cierra lo
+  abierto y no abre más. Un activo que nunca abrió no cuenta para el criterio de
+  funding (sin posiciones el neto es 0 y ya descarta). La persistencia general por
+  activo (30 y 90 días, abierta o no) se ve aparte en `funding_persistencia`.
 
 ## `tendencia`: ETH y BTC, 4h y 1D
 
@@ -62,7 +79,9 @@ Señal estándar, sin ajustar a los datos:
   con tope `risk.max_position_pct` (25%) por posición y `risk.max_exposure_pct`
   (25%) en total.
 - **Veto de economía**: `expected_edge_bps` (100, supuesto como los de
-  `policy.yaml`) tiene que superar comisión + deslizamiento + gas de ida y vuelta.
+  `policy.yaml`; se fija en `sombra.tendencia.expected_edge_bps` de
+  `config/desk.yaml`, decisión de producto) tiene que superar comisión +
+  deslizamiento + gas de ida y vuelta.
 - **Descarte**: tras 20 operaciones cerradas o 60 días (lo primero), descartada si
   la esperanza neta por operación ≤ 0 (o si no hubo operaciones).
 

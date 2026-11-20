@@ -186,7 +186,8 @@ class TendenciaConfig(BaseModel):
     atr_1d: int = 14
     atr_mult_stop: Decimal = Decimal("2")
     # Supuesto (no medido), igual que expected_edge_bps de gambler/house en policy.yaml.
-    expected_edge_bps: Decimal = Decimal("100")
+    # Se fija en config/desk.yaml (sombra.tendencia.expected_edge_bps); es decisión de producto.
+    expected_edge_bps: Decimal = Field(default=Decimal("100"), ge=0)
     descarte_operaciones: int = 20
     descarte_dias: int = 60
 
@@ -197,6 +198,13 @@ class SombraConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     funding_historial_dias: int = 120
+    # Tope de tiempo total de sombra en cada tick, en segundos. Se revisa antes de
+    # cada llamada HTTP; si se pasa, sombra corta limpio y sigue en el próximo tick.
+    # Lo más que se excede es una llamada (timeout HTTP de 8 s).
+    deadline_segundos: float = Field(default=20.0, gt=0)
+    # Páginas de fundingHistory (≤ 500 h) por activo y por tick. El relleno inicial
+    # se reparte en varios ticks guardando el avance.
+    paginas_funding_por_tick: int = Field(default=2, ge=1)
     carry: CarryConfig = Field(default_factory=CarryConfig)
     tendencia: TendenciaConfig = Field(default_factory=TendenciaConfig)
 

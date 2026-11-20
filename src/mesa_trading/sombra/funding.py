@@ -7,6 +7,7 @@ que la tasa anualizada es la tasa horaria × 8760.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal
 
@@ -14,7 +15,11 @@ from mesa_trading.util import as_utc, iso
 
 HORAS_ANIO = Decimal("8760")
 HORA_MS = 3_600_000
-MAX_PAGINAS_POR_TICK = 8
+# Páginas de `fundingHistory` (hasta 500 h cada una) por activo y por tick. El
+# relleno inicial de 120 días (~6 páginas) se reparte en varios ticks.
+PAGINAS_POR_TICK = 2
+# Hyperliquid publica la hora con un poco de retraso: al día = última fila hace < 2 h.
+HORAS_AL_DIA = 2
 
 HISTORIAL_KEY = "sombra/funding/historial.json"
 
@@ -23,11 +28,22 @@ def ms(when: datetime) -> int:
     return int(as_utc(when).timestamp() * 1000)
 
 
-def actualizar_historial(store: dict | None, fuente, activos: list[str], now: datetime, dias: int) -> dict:
+def actualizar_historial(
+    store: dict | None,
+    fuente,
+    activos: list[str],
+    now: datetime,
+    dias: int,
+    paginas: int = PAGINAS_POR_TICK,
+    agotado: Callable[[], bool] | None = None,
+) -> dict:
     """Agrega las horas nuevas de cada activo. Recorta a `dias` hacia atrás.
 
     Pide solo si ya debería existir una hora nueva (≥ 60 min desde la última fila).
-    Un error en un activo no borra lo guardado; queda anotado en `errores`.
+    Pide a lo más `paginas` por activo; lo que falte sigue en el próximo tick
+    desde la última fila guardada (el avance es la serie misma). `agotado()` se
+    revisa antes de cada llamada: si es True, corta y anota `deadline`. Un error
+    en un activo no borra lo guardado; queda anotado en `errores`.
     """
     store = dict(store or {})
     series: dict[str, list[list]] = {k: list(v) for k, v in (store.get("series") or {}).items()}
@@ -39,9 +55,13 @@ def actualizar_historial(store: dict | None, fuente, activos: list[str], now: da
         ultimo = int(filas[-1][0]) if filas else None
         if ultimo is not None and now_ms - ultimo < HORA_MS:
             continue
-        inicio = piso if ultimo is None else ultimo + 1
+        # Si lo guardado quedó antes del piso (mesa apagada mucho tiempo), arranca en el piso.
+        inicio = piso if ultimo is None or ultimo < piso else ultimo + 1
         try:
-            for _ in range(MAX_PAGINAS_POR_TICK):
+            for _ in range(max(0, paginas)):
+                if agotado is not None and agotado():
+                    errores[activo] = "deadline"
+                    break
                 nuevas = fuente.funding_history(activo, inicio, now_ms)
                 nuevas = [(t, r) for t, r in nuevas if t >= inicio]
                 if not nuevas:
@@ -60,7 +80,16 @@ def actualizar_historial(store: dict | None, fuente, activos: list[str], now: da
     store["actualizado_en"] = iso(now)
     store["fuente"] = "hyperliquid POST /info fundingHistory (cada hora)"
     store["errores"] = errores
+    store["al_dia"] = {activo: al_dia(store, activo, now) for activo in activos}
     return store
+
+
+def al_dia(store: dict | None, activo: str, now: datetime) -> bool:
+    """True si la serie llega hasta las últimas `HORAS_AL_DIA` horas (relleno terminado)."""
+    filas = (store or {}).get("series", {}).get(activo) or []
+    if not filas:
+        return False
+    return ms(now) - int(filas[-1][0]) < HORAS_AL_DIA * HORA_MS
 
 
 def tasas(store: dict | None, activo: str, desde_ms: int | None = None, hasta_ms: int | None = None) -> list[tuple[int, Decimal]]:
@@ -112,22 +141,12 @@ def resumen_persistencia(store: dict | None, activos: list[str], now: datetime) 
         "fuente": (store or {}).get("fuente"),
         "actualizado_en": (store or {}).get("actualizado_en"),
         "errores": (store or {}).get("errores") or {},
+        "al_dia": (store or {}).get("al_dia") or {},
         "activos": {
             activo: {"30d": persistencia(store, activo, now, 30), "90d": persistencia(store, activo, now, 90)}
             for activo in activos
         },
     }
-
-
-def pct_positivo_desde(store: dict | None, activos: list[str], desde: datetime, now: datetime) -> tuple[int, int]:
-    """Horas positivas y horas totales desde `desde`, sumando los activos."""
-    positivos = total = 0
-    for activo in activos:
-        for _t, r in tasas(store, activo, desde_ms=ms(desde), hasta_ms=ms(now)):
-            total += 1
-            if r > 0:
-                positivos += 1
-    return positivos, total
 
 
 def _fmt(value: Decimal, places: int) -> str:
