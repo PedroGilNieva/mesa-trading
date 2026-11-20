@@ -187,7 +187,7 @@ class TendenciaConfig(BaseModel):
     atr_mult_stop: Decimal = Decimal("2")
     # Supuesto (no medido), igual que expected_edge_bps de gambler/house en policy.yaml.
     # Se fija en config/desk.yaml (sombra.tendencia.expected_edge_bps); es decisión de producto.
-    expected_edge_bps: Decimal = Field(default=Decimal("100"), ge=0)
+    expected_edge_bps: Decimal = Field(default=Decimal("80"), ge=0)
     descarte_operaciones: int = 20
     descarte_dias: int = 60
 

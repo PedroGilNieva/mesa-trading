@@ -78,7 +78,7 @@ Señal estándar, sin ajustar a los datos:
 - **Tamaño por riesgo**: `nocional = 0.5% × equity / (distancia al stop / precio)`,
   con tope `risk.max_position_pct` (25%) por posición y `risk.max_exposure_pct`
   (25%) en total.
-- **Veto de economía**: `expected_edge_bps` (100, supuesto como los de
+- **Veto de economía**: `expected_edge_bps` (80, igual que house; supuesto como los de
   `policy.yaml`; se fija en `sombra.tendencia.expected_edge_bps` de
   `config/desk.yaml`, decisión de producto) tiene que superar comisión +
   deslizamiento + gas de ida y vuelta.

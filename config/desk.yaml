@@ -146,7 +146,8 @@ sombra:
     donchian_salida_4h: 10
     atr_1d: 14
     atr_mult_stop: 2
-    # Ventaja supuesta (no medida) para el veto de economía. Decisión de producto.
-    expected_edge_bps: 100
+    # Ventaja supuesta (no medida) para el veto de economía. Decisión de producto:
+    # 80, igual que house en policy.yaml.
+    expected_edge_bps: 80
     descarte_operaciones: 20
     descarte_dias: 60

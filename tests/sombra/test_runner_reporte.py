@@ -179,6 +179,6 @@ def test_deadline_corta_limpio_y_sigue_en_el_proximo_tick(tmp_path):
 
 def test_expected_edge_bps_de_tendencia_viene_de_desk_yaml():
     texto = (Path(__file__).resolve().parents[2] / "config" / "desk.yaml").read_text()
-    assert "expected_edge_bps: 100" in texto
-    assert desk().sombra.tendencia.expected_edge_bps == Decimal("100")
+    assert "expected_edge_bps: 80" in texto
+    assert desk().sombra.tendencia.expected_edge_bps == Decimal("80")
     assert _desk().sombra.deadline_segundos == 20 and _desk().sombra.paginas_funding_por_tick == 2

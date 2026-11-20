@@ -31,8 +31,9 @@ def test_tamano_por_riesgo_y_topes():
 
 def test_veto_de_economia_sigue_aplicando():
     sched = FEES["hyperliquid_perp"]
-    ok, edge, costos = td.veto_economia(Decimal("1000"), sched, Decimal("1"), CFG.liquidez_supuesta_usd, CFG.extra_bps, Decimal("100"))
-    assert ok and edge == Decimal("10") and costos.total < edge
+    ok, edge, costos = td.veto_economia(Decimal("1000"), sched, Decimal("1"), CFG.liquidez_supuesta_usd, CFG.extra_bps, CFG.expected_edge_bps)
+    assert CFG.expected_edge_bps == Decimal("80")  # decisión de producto, igual que house
+    assert ok and edge == Decimal("8") and costos.total < edge
     ok, _e, _c = td.veto_economia(Decimal("1000"), sched, Decimal("1"), CFG.liquidez_supuesta_usd, CFG.extra_bps, Decimal("10"))
     assert not ok  # 10 bps no cubren ~13 bps de ida y vuelta
 
