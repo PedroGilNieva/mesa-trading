@@ -356,44 +356,86 @@ def test_a_newer_period_that_does_not_count_blocks_the_previous_one():
     assert forced["cierres"] == 0
 
 
-def test_simulation_v3_does_not_count_even_if_curves_are_marked_approved():
-    """Identidad de la version 3, con flag y curvas aprobadas, no es un GO."""
-    marked = {
-        "version": 3,
-        "cuenta_como_evidencia": True,
-        "curvas": {
-            "gambler.regimen": {"a": "1", "b": "0", "aprobada": True, "fuente": "informe"},
-            "gambler.setup": {"a": "1.2", "b": "-0.1", "aprobada": True, "fuente": "informe"},
-        },
-    }
-    assert policy_counts_as_evidence(marked) is False
+def _closed_events(version, count, started, reason="take_profit", flag=False, prefix="c"):
+    return [
+        {
+            "event_id": f"{prefix}{version}-{reason}-{index}",
+            "event_type": "PositionClosed",
+            "occurred_at": started,
+            "bot": "gambler",
+            "mode": "simulated",
+            "payload": {"pnl_usd": "1", "reason": reason, "threshold_version": version, "cuenta_como_evidencia": flag},
+        }
+        for index in range(count)
+    ]
+
+
+def test_simulation_v3_counts_as_evidence_without_flag_or_approved_curves():
+    """Issue #33: los cierres de la v3 cuentan aunque el evento no traiga el flag."""
+    assert policy_counts_as_evidence({"version": 3}) is True
     promo = load_promotion(repo_root() / "config" / "promotion.yaml")
     config = load_desk(repo_root() / "config" / "desk.yaml")
     started = (NOW - timedelta(days=20)).strftime("%Y-%m-%dT%H:%M:%S.000000Z")
-    events = []
-    for index in range(200):
-        events.append(
-            {
-                "event_id": f"s{index}",
-                "event_type": "PositionClosed",
-                "occurred_at": started,
-                "bot": "gambler",
-                "mode": "simulated",
-                "payload": {"pnl_usd": "1", "threshold_version": 3, "cuenta_como_evidencia": True},
-            }
-        )
-    for index, (prob, outcome) in enumerate([(0.8, "si"), (0.8, "si"), (0.2, "no"), (0.2, "no")]):
-        events.extend(_resolved(f"sv3-{index}", 3, True, prob, outcome, started))
+    events = _closed_events(3, 200, started)
     calibration = build_calibration(events, promo, config, NOW)
-    assert calibration["periodos"]["3"]["cuenta_como_evidencia"] is False
-    tampered = calibration["pair_store"]
-    tampered["periodos"]["3"]["cuenta_como_evidencia"] = True
-    assert update_pair_store(tampered, [])["periodos"]["3"]["cuenta_como_evidencia"] is False
+    assert calibration["periodos"]["3"]["cuenta_como_evidencia"] is True
     snap = evidence_snapshot(calibration)
     assert snap["threshold_version"] == 3
-    assert snap["cuenta_como_evidencia"] is False
-    assert snap["cierres"] == 0
-    assert calibration["preguntas"]["gambler"]["regimen"]["n"] == 0
+    assert snap["cuenta_como_evidencia"] is True
+    assert snap["cierres"] == 200
+    assert snap["pnl_usd"] == "200"
+    report = apply_verdict(
+        _daily(),
+        calibration,
+        promo,
+        closed_trades=snap["cierres"],
+        started_at=snap["desde"],
+        capital_usd=Decimal("1000"),
+        max_drawdown_usd=Decimal(snap["drawdown_usd"]),
+        now=NOW,
+        pnl_usd=Decimal(snap["pnl_usd"]),
+    )
+    veredicto = report["veredicto"]
+    assert veredicto["operaciones_cerradas_evidencia"] == 200
+    assert veredicto["dias_observados"] >= 14
+    assert "usa solo la version 3" in veredicto["nota"]
+
+
+def test_simulation_v2_and_earlier_do_not_count_even_if_marked():
+    promo = load_promotion(repo_root() / "config" / "promotion.yaml")
+    config = load_desk(repo_root() / "config" / "desk.yaml")
+    started = (NOW - timedelta(days=20)).strftime("%Y-%m-%dT%H:%M:%S.000000Z")
+    for version in (2, 1):
+        events = _closed_events(version, 200, started, flag=True)
+        calibration = build_calibration(events, promo, config, NOW)
+        assert calibration["periodos"][str(version)]["cuenta_como_evidencia"] is False
+        tampered = calibration["pair_store"]
+        tampered["periodos"][str(version)]["cuenta_como_evidencia"] = True
+        assert update_pair_store(tampered, [])["periodos"][str(version)]["cuenta_como_evidencia"] is False
+        snap = evidence_snapshot(calibration)
+        assert snap["threshold_version"] == version
+        assert snap["cuenta_como_evidencia"] is False
+        assert snap["cierres"] == 0
+
+
+def test_v3_keeps_period_separate_from_v2_and_cierre_sin_datos_is_not_evidence():
+    promo = load_promotion(repo_root() / "config" / "promotion.yaml")
+    config = load_desk(repo_root() / "config" / "desk.yaml")
+    started = (NOW - timedelta(days=20)).strftime("%Y-%m-%dT%H:%M:%S.000000Z")
+    events = (
+        _closed_events(2, 50, started, flag=True)
+        + _closed_events(3, 150, started)
+        + _closed_events(3, 50, started, reason="cierre_sin_datos")
+    )
+    calibration = build_calibration(events, promo, config, NOW)
+    assert calibration["periodos"]["2"]["cierres"] == 50
+    assert calibration["periodos"]["3"]["cierres"] == 150
+    assert calibration["periodos"]["3"]["cierres_sin_datos"] == 50
+    snap = evidence_snapshot(calibration)
+    # Solo la v3 y sin cierre_sin_datos: 150, no 200 ni 250.
+    assert snap["threshold_version"] == 3
+    assert snap["cierres"] == 150
+    assert snap["cierres_sin_datos"] == 50
     report = apply_verdict(
         _daily(),
         calibration,
@@ -406,5 +448,4 @@ def test_simulation_v3_does_not_count_even_if_curves_are_marked_approved():
         pnl_usd=Decimal(snap["pnl_usd"]),
     )
     assert report["veredicto"]["estado"] == "insuficiente"
-    assert "version 3" in report["veredicto"]["nota"]
-    assert "no cuenta" in report["veredicto"]["nota"]
+    assert report["veredicto"]["cierres_sin_datos"] == 50

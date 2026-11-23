@@ -13,8 +13,11 @@ from mesa_trading.models import Proposal
 
 
 # 2: curva identidad. 3: los mismos umbrales recalibrados, todavía en simulado.
-# Ninguna cuenta para un GO aunque el flag o las curvas digan que sí.
+# Decisión de Pedro (22 nov 2026): los cierres de la v3 cuentan como evidencia
+# del veredicto (200 cierres / 14 días). La v2 y las anteriores no cuentan aunque
+# el flag o las curvas digan que sí. Un GO sigue sin habilitar dinero real.
 SIMULATION_POLICY_VERSIONS = frozenset({2, 3})
+EVIDENCE_SIMULATION_POLICY_VERSIONS = frozenset({3})
 IDENTITY_POLICY_VERSION = 2
 
 
@@ -25,20 +28,38 @@ def is_simulation_policy_version(version: Any) -> bool:
         return False
 
 
+def is_pre_evidence_policy_version(version: Any) -> bool:
+    """v2 y anteriores (y versiones sin número válido): nunca cuentan para el veredicto."""
+    try:
+        return int(version) <= IDENTITY_POLICY_VERSION
+    except (TypeError, ValueError):
+        return True
+
+
+def is_evidence_simulation_policy_version(version: Any) -> bool:
+    """Versión de simulación cuyos cierres sí cuentan para el veredicto (hoy, la 3)."""
+    try:
+        return int(version) in EVIDENCE_SIMULATION_POLICY_VERSIONS
+    except (TypeError, ValueError):
+        return False
+
+
 def load_policy(path: Path | None = None) -> dict[str, Any]:
     target = path or default_policy_path()
     return yaml.safe_load(target.read_text(encoding="utf-8"))
 
 
 def policy_counts_as_evidence(policy: dict[str, Any] | None) -> bool:
-    """Una version cuenta para el GO solo si no es la identidad y todas sus curvas están aprobadas."""
+    """La v3 (simulación) cuenta. La v2 y anteriores no. Las demás, solo con flag y curvas aprobadas."""
     if not policy:
         return False
     try:
         version = int(policy.get("version") or 0)
     except (TypeError, ValueError):
         return False
-    if version == 0 or is_simulation_policy_version(version):
+    if is_evidence_simulation_policy_version(version):
+        return True
+    if is_pre_evidence_policy_version(version):
         return False
     if policy.get("cuenta_como_evidencia") is not True:
         return False

@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from mesa_trading.config import DeskConfig, PromotionConfig
 from mesa_trading.constants import ESTIMATED_INPUT_TOKENS_PER_CALL
-from mesa_trading.policy.decide import is_simulation_policy_version
+from mesa_trading.policy.decide import is_evidence_simulation_policy_version, is_pre_evidence_policy_version
 from mesa_trading.questions.catalog import battery_for
 from mesa_trading.filter.funnel import silent_step_alerts
 from mesa_trading.reports.costos import render_cost_md
@@ -216,8 +216,8 @@ def _version_rank(body: dict) -> int:
 def evidence_snapshot(calibration: dict) -> dict:
     """El GO mira solo el periodo de threshold_version más alto.
 
-    Si ese periodo no cuenta (versiones 2 y 3 de simulación, sin aprobar,
-    o sin version), el veredicto queda sin evidencia. No se usa uno anterior.
+    La v3 (simulación) cuenta. Si ese periodo no cuenta (v2 y anteriores, sin
+    aprobar, o sin version), el veredicto queda sin evidencia. No se usa uno anterior.
     """
     chosen = None
     rank = -2
@@ -234,7 +234,7 @@ def evidence_snapshot(calibration: dict) -> dict:
     counts = (
         chosen is not None
         and number is not None
-        and not is_simulation_policy_version(number)
+        and not is_pre_evidence_policy_version(number)
         and bool(chosen.get("cuenta_como_evidencia"))
     )
     if not counts:
@@ -730,7 +730,8 @@ def _copy_period(body: dict) -> dict:
         bot: {qid: [list(row) for row in rows] for qid, rows in questions.items()}
         for bot, questions in (body.get("pares") or {}).items()
     }
-    if is_simulation_policy_version(period["threshold_version"]):
+    version = period["threshold_version"]
+    if is_pre_evidence_policy_version(version):
         period["cuenta_como_evidencia"] = False
     return period
 
@@ -743,8 +744,11 @@ def _period_identity(payload: dict | None) -> tuple[str, int | None, bool]:
         version = int(raw)
     except (TypeError, ValueError):
         return "sin_version", None, False
-    if version <= 0 or is_simulation_policy_version(version):
-        # 2 y 3 son simulación: no cuentan aunque el evento las marque.
+    if is_evidence_simulation_policy_version(version):
+        # La v3 es simulación pero cuenta (decisión del 22 nov 2026), aunque el evento no traiga el flag.
+        return str(version), version, True
+    if is_pre_evidence_policy_version(version):
+        # La v2 y anteriores no cuentan aunque el evento las marque.
         key = "sin_version" if version <= 0 else str(version)
         number = None if version <= 0 else version
         return key, number, False
@@ -783,10 +787,11 @@ def _add_close(period: dict, pnl: Decimal, when: str | None, reason: str | None 
     period["pnl_usd"] = format(total, "f")
     period["pnl_pico_usd"] = format(peak, "f")
     period["drawdown_usd"] = format(worst, "f")
-    period["cierres"] = int(period["cierres"]) + 1
     if reason == CIERRE_SIN_DATOS:
-        # Cuenta como cierre, pero se reporta aparte: salió al último precio conocido.
+        # No cuenta como evidencia: salió al último precio conocido. Se reporta aparte.
         period["cierres_sin_datos"] = int(period.get("cierres_sin_datos") or 0) + 1
+    else:
+        period["cierres"] = int(period["cierres"]) + 1
     _note_when(period, when)
 
 
@@ -887,9 +892,12 @@ def book_sample(book: dict | None, now: datetime) -> dict:
         today = moment.astimezone(CDMX).date()
         inicio_cdmx = start_day.isoformat()
         dias_cdmx = max((today - start_day).days + 1, 0)
+    sin_datos = int(por_motivo.get(CIERRE_SIN_DATOS, 0))
     return {
-        "cierres": cierres,
-        "cierres_sin_datos": int(por_motivo.get(CIERRE_SIN_DATOS, 0)),
+        # El contador de evidencia no incluye cierre_sin_datos; se reporta aparte.
+        "cierres": max(cierres - sin_datos, 0),
+        "cierres_totales": cierres,
+        "cierres_sin_datos": sin_datos,
         "cierres_por_motivo": por_motivo,
         "desde": started_at,
         "inicio_cdmx": inicio_cdmx,
@@ -993,8 +1001,8 @@ def apply_verdict(
     muestra += ". "
     if sin_datos:
         muestra += (
-            f"De esos, {sin_datos} fueron cierre_sin_datos (cerrados con el último precio conocido); "
-            "cuentan, pero se marcan aparte. "
+            f"Además hubo {sin_datos} cierre_sin_datos (cerrados con el último precio conocido); "
+            "no cuentan en el contador de evidencia y se marcan aparte. "
         )
     if book is not None:
         muestra += (
@@ -1040,17 +1048,17 @@ def _evidence_note(calibration: dict) -> str:
     if version is None:
         return (
             "No hay un periodo que cuente como evidencia. "
-            "El PnL y el skill de la version 2 y la version 3 (simulación) no entran en este veredicto."
+            "El PnL y el skill de la version 2 y anteriores no entran en este veredicto."
         )
     if not evidencia.get("cuenta_como_evidencia"):
         return (
             f"El periodo más nuevo es la version {version} y no cuenta como evidencia. "
             "El veredicto no vuelve a un periodo anterior. "
-            "La version 2 y la version 3, de simulación, tampoco entran en el PnL ni en el skill."
+            "La version 2 y anteriores tampoco entran en el PnL ni en el skill."
         )
     return (
         f"Este veredicto usa solo la version {version}. "
-        "La version 2 y la version 3, de simulación, no entran en el PnL ni en el skill."
+        "La version 2 y anteriores no entran en el PnL ni en el skill."
     )
 
 

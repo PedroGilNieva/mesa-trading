@@ -63,7 +63,7 @@ def test_identity_curve_only_applies_in_simulated():
     assert apply_calibration(probs, curve=identity, mode="real") is None
     assert apply_calibration(probs, curve=identity, mode="live") is None
     assert apply_calibration(probs, curve=identity, mode="") is None
-    assert policy_counts_as_evidence(load_policy()) is False
+    assert policy_counts_as_evidence(load_policy()) is True  # v3 cuenta (issue #33)
     shadowed = apply_calibration(probs, curve={"a": "2", "b": "0", "aprobada": True, "fuente": "x"}, mode="shadow")
     assert shadowed is not None
     assert shadowed["si"] == Decimal("0.6")
@@ -71,40 +71,24 @@ def test_identity_curve_only_applies_in_simulated():
     assert apply_calibration(probs, curve={"a": "1.2", "b": "-0.1"}, mode="simulated") is None
     approved = {"a": "1.2", "b": "-0.1", "aprobada": True, "fuente": "informe interno"}
     assert apply_calibration(probs, curve=approved, mode="simulated") is not None
-    lying = dict(load_policy())
-    lying["cuenta_como_evidencia"] = True
-    assert policy_counts_as_evidence(lying) is False
+    v2_marked = {"version": 2, "cuenta_como_evidencia": True, "curvas": {"gambler.regimen": {"a": "1.2", "b": "-0.1", "aprobada": True, "fuente": "informe"}}}
+    assert policy_counts_as_evidence(v2_marked) is False
+    assert policy_counts_as_evidence({"version": 1, "cuenta_como_evidencia": True, "curvas": v2_marked["curvas"]}) is False
     approved_policy = {
         "version": 4,
         "cuenta_como_evidencia": True,
         "curvas": {"gambler.regimen": {"a": "1.2", "b": "-0.1", "aprobada": True, "fuente": "informe"}},
     }
     assert policy_counts_as_evidence(approved_policy) is True
-    simulation_marked_approved = {
-        "version": 3,
-        "cuenta_como_evidencia": True,
-        "curvas": {
-            "gambler.regimen": {"a": "1", "b": "0", "aprobada": True, "fuente": "informe"},
-            "gambler.setup": {"a": "1.2", "b": "-0.1", "aprobada": True, "fuente": "informe"},
-        },
-    }
-    assert policy_counts_as_evidence(simulation_marked_approved) is False
+    # La v3 cuenta sin depender del flag ni de las curvas; v2 y anteriores nunca.
+    assert policy_counts_as_evidence({"version": 3}) is True
+    assert policy_counts_as_evidence({"version": 3, "cuenta_como_evidencia": False, "curvas": {}}) is True
+    assert policy_counts_as_evidence({"version": 2, "cuenta_como_evidencia": True, "curvas": {}}) is False
+    assert policy_counts_as_evidence({"version": 0}) is False
     assert policy_counts_as_evidence({"version": "no"}) is False
-    assert policy_counts_as_evidence({"version": 3, "cuenta_como_evidencia": True, "curvas": {}}) is False
-    assert policy_counts_as_evidence({"version": 3, "cuenta_como_evidencia": True, "curvas": {"x": "no"}}) is False
-    assert policy_counts_as_evidence({"version": 3, "curvas": approved_policy["curvas"]}) is False
-    blank_source = {
-        "version": 3,
-        "cuenta_como_evidencia": True,
-        "curvas": {"gambler.regimen": {"a": "1.2", "b": "0.1", "aprobada": True, "fuente": "  "}},
-    }
-    assert policy_counts_as_evidence(blank_source) is False
-    identity_policy = {
-        "version": 3,
-        "cuenta_como_evidencia": True,
-        "curvas": {"gambler.regimen": {"a": "1", "b": "0", "aprobada": True, "fuente": "x"}},
-    }
-    assert policy_counts_as_evidence(identity_policy) is False
+    # Las versiones nuevas siguen exigiendo flag y curvas aprobadas.
+    assert policy_counts_as_evidence({"version": 4, "curvas": approved_policy["curvas"]}) is False
+    assert policy_counts_as_evidence({"version": 4, "cuenta_como_evidencia": True, "curvas": {}}) is False
     assert policy_counts_as_evidence(None) is False
 
 

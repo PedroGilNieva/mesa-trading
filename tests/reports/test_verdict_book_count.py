@@ -1,8 +1,8 @@
 """El contador del veredicto sale del libro (el mismo de /estado), no de pares.json.
 
-Issue #25: con la política en version 3 (simulación) el snapshot de evidencia
-siempre trae 0 cierres y sin fecha de inicio, y el reporte decía
-"0 cierres en 0 días" con 32 cerradas en el libro.
+Issue #25: el contador debe salir del libro. Issue #33: los cierres de la
+version 3 cuentan como evidencia; cierre_sin_datos no entra al contador y se
+marca aparte.
 """
 
 import json
@@ -68,7 +68,9 @@ def test_book_sample_counts_closes_and_marks_cierre_sin_datos_apart():
         "started_at": iso(NOW - timedelta(days=3, hours=12)),
     }
     sample = book_sample(book, NOW)
-    assert sample["cierres"] == 32
+    # cierre_sin_datos no entra al contador de evidencia.
+    assert sample["cierres"] == 29
+    assert sample["cierres_totales"] == 32
     assert sample["cierres_sin_datos"] == 3
     # Los 9 de antes de llevar la cuenta por motivo no se pierden.
     assert sample["cierres_por_motivo"] == {"take_profit": 20, "cierre_sin_datos": 3, "sin_motivo_registrado": 9}
@@ -98,7 +100,7 @@ def test_trading_day_cuts_at_cdmx_midnight():
 
 
 def test_verdict_counter_uses_book_when_period_is_simulation():
-    """Reproduce el reporte de staging: version 3, 32 cerradas en el libro."""
+    """Version 3: sus cierres cuentan; cierre_sin_datos queda aparte."""
     promo = _promo()
     events = [
         {
@@ -117,8 +119,9 @@ def test_verdict_counter_uses_book_when_period_is_simulation():
         for index in range(4)
     ]
     calibration = build_calibration(events, promo, _desk(), NOW)
-    assert calibration["evidencia"]["cierres"] == 0
-    assert calibration["periodos"]["3"]["cierres"] == 4
+    assert calibration["evidencia"]["cuenta_como_evidencia"] is True
+    assert calibration["evidencia"]["cierres"] == 3
+    assert calibration["periodos"]["3"]["cierres"] == 3
     assert calibration["periodos"]["3"]["cierres_sin_datos"] == 1
     daily = build_daily(events, _desk(), NOW, book={"realized_pnl_usd": "2", "drawdown_usd": "0"})
     sample = book_sample(
@@ -141,24 +144,24 @@ def test_verdict_counter_uses_book_when_period_is_simulation():
         book=sample,
     )
     verdict = report["veredicto"]
-    assert verdict["operaciones_cerradas"] == 32
+    assert verdict["operaciones_cerradas"] == 30
     assert verdict["cierres_sin_datos"] == 2
     assert verdict["dias_observados"] == 4
-    assert verdict["cierres_por_dia"] == 8
-    assert verdict["dias_estimados_para_muestra"] == 21
-    # El GO sigue mirando solo evidencia: version 3 no cuenta.
-    assert verdict["operaciones_cerradas_evidencia"] == 0
+    assert verdict["cierres_por_dia"] == 7.5
+    assert verdict["dias_estimados_para_muestra"] == 22.7
+    # La version 3 cuenta como evidencia; cierre_sin_datos no.
+    assert verdict["operaciones_cerradas_evidencia"] == 3
     assert verdict["estado"] == "insuficiente"
-    assert "Muestra del libro: 32 cierres en 4.0 días" in verdict["nota"]
-    assert "2 fueron cierre_sin_datos" in verdict["nota"]
-    assert "Cuentan como evidencia para el GO: 0 cierres" in verdict["nota"]
+    assert "Muestra del libro: 30 cierres en 4.0 días" in verdict["nota"]
+    assert "2 cierre_sin_datos" in verdict["nota"]
+    assert "Cuentan como evidencia para el GO: 3 cierres" in verdict["nota"]
     assert report["cierres_del_periodo"] == {
         "total": 4,
         "cierre_sin_datos": 1,
         "por_motivo": {"cierre_sin_datos": 1, "take_profit": 3},
     }
     md = render_daily_md(report)
-    assert "Contador: 32 de 200 cierres, 4.0 de 14 días." in md
+    assert "Contador: 30 de 200 cierres, 4.0 de 14 días." in md
     assert "cierre_sin_datos (aparte): 2." in md
     assert "Cierres en el periodo: 4. De ellos, cierre_sin_datos (último precio conocido): 1." in md
 
@@ -194,7 +197,7 @@ def test_pair_store_keeps_cierre_sin_datos_across_runs():
     }
     first = update_pair_store(None, [event])
     again = update_pair_store(json.loads(json.dumps(first)), [event])
-    assert again["periodos"]["3"]["cierres"] == 1
+    assert again["periodos"]["3"]["cierres"] == 0
     assert again["periodos"]["3"]["cierres_sin_datos"] == 1
 
 
@@ -237,7 +240,7 @@ def test_report_cli_reads_the_same_book_as_estado(tmp_path, monkeypatch):
     daily_dir = Path(tmp_path) / "reportes" / "diario"
     [daily_json] = list(daily_dir.glob("*.json"))
     verdict = json.loads(daily_json.read_text(encoding="utf-8"))["veredicto"]
-    assert verdict["operaciones_cerradas"] == 32
+    assert verdict["operaciones_cerradas"] == 31
     assert verdict["cierres_sin_datos"] == 1
     assert verdict["dias_observados"] >= 1.99
     assert verdict["operaciones_cerradas_evidencia"] == 0

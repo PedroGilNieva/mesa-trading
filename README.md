@@ -77,6 +77,10 @@ Veredicto (`veredicto.estado`), solo con dinero simulado:
 - **insuficiente** hasta 200 cierres y 14 días.
 - **go_tentativo** si, con esa muestra, el PnL después de comisiones y slippage es > 0 y el skill de Brier de las preguntas de política es ≥ 0.02. No autoriza dinero real.
 - **no_go** si, ya con la muestra, el PnL no es positivo o el skill es ≤ 0. También si el drawdown pasa el 15% del capital antes.
+- **Qué cuenta como evidencia** (decisión de Pedro, 22 nov 2026): los cierres de la política **v3** (`SIMULATION_POLICY_VERSIONS`, simulado) cuentan para el contador de 200 cierres y 14 días, en el veredicto y en el reporte diario. La **v2** y las anteriores no cuentan nunca, aunque el evento o la política traigan `cuenta_como_evidencia: true`. Las versiones posteriores a la 3 siguen necesitando el flag y curvas aprobadas.
+- Los cierres con motivo `cierre_sin_datos` (salida al último precio conocido) **no entran** al contador de evidencia: se reportan aparte (`cierres_sin_datos`, línea «cierre_sin_datos (aparte)» del reporte). Siguen sumando en `cierres_totales` del libro.
+- La calibración y el veredicto siguen separados por `threshold_version`: el veredicto mira solo el periodo de la versión más alta, y no mezcla cierres, PnL ni Brier de la v2 con los de la v3.
+- Un GO sigue sin habilitar dinero real ni un broker real.
 - Con una sola posición, ~10 cierres al día juntan la muestra en ~20 días; ~2 al día, en ~100. El reporte calcula el ritmo observado.
 
 ## Staging

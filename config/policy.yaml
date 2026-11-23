@@ -7,11 +7,12 @@
 # House sí puede cotizar (orden límite al 25% del capital). El SimBroker no la
 # llena si no hay una vela posterior que cruce el límite; hasta ver esos fills,
 # las cotizaciones no son evidencia.
-# cuenta_como_evidencia queda en false, y además la version 3 está en el
-# candado duro junto con la 2: no cuenta para un GO aunque alguien marque
-# el flag o las curvas como aprobadas.
+# Decisión de Pedro, 22 nov 2026: los cierres de la version 3 cuentan como
+# evidencia del veredicto (200 cierres y 14 días), aunque sigan en simulado.
+# La version 2 y las anteriores no cuentan nunca. Un GO no habilita dinero
+# real ni un broker real; las curvas siguen siendo identidad y sin aprobar.
 version: 3
-cuenta_como_evidencia: false
+cuenta_como_evidencia: true
 curvas:
   gambler.regimen: {a: "1", b: "0", aprobada: false, fuente: "identidad de staging; no es evidencia de edge"}
   gambler.setup: {a: "1", b: "0", aprobada: false, fuente: "identidad de staging; no es evidencia de edge"}
